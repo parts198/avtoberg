@@ -1,0 +1,185 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PromoType {
+  PERCENT
+  FIXED
+}
+
+enum WarehouseType {
+  FBS
+  FBO
+}
+
+enum PostingScheme {
+  FBS
+  FBO
+}
+
+model Store {
+  id                       String   @id @default(cuid())
+  name                     String
+  clientId                 String
+  apiKeyEnc                String
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  lastSyncPricesAt         DateTime?
+  lastSyncStocksAt         DateTime?
+  lastSyncPostingsAt       DateTime?
+  lastSyncTransactionsAt   DateTime?
+  lastError                String?
+  defaults                 StoreDefaults?
+  products                 Product[]
+  productEconomics         ProductEconomics[]
+  priceSnapshots           PriceSnapshot[]
+  stockSnapshots           StockSnapshot[]
+  postings                 Posting[]
+  postingPlanSnapshots     PostingPlanSnapshot[]
+  transactionOperations    TransactionOperation[]
+}
+
+model StoreDefaults {
+  id             String   @id @default(cuid())
+  storeId        String   @unique
+  store          Store    @relation(fields: [storeId], references: [id])
+  acquiringPct   Decimal  @default(0)
+  commissionPct  Decimal  @default(0)
+  deliveryRub    Decimal  @default(0)
+  logisticsRub   Decimal  @default(0)
+  firstMileRub   Decimal  @default(0)
+  packagingRub   Decimal  @default(0)
+  promoType      PromoType?
+  promoValue     Decimal?
+}
+
+model Product {
+  id         String   @id @default(cuid())
+  storeId    String
+  store      Store    @relation(fields: [storeId], references: [id])
+  productId  String
+  offerId    String
+  sku        String
+  name       String
+  archived   Boolean  @default(false)
+  updatedAt  DateTime @updatedAt
+  economics  ProductEconomics?
+  postings   PostingItem[]
+  priceSnapshots PriceSnapshot[]
+
+  @@unique([storeId, productId])
+  @@index([storeId, offerId])
+  @@index([storeId, sku])
+}
+
+model ProductEconomics {
+  id            String   @id @default(cuid())
+  storeId       String
+  productId     String   @unique
+  store         Store    @relation(fields: [storeId], references: [id])
+  product       Product  @relation(fields: [productId], references: [id])
+  costRub       Decimal  @default(0)
+  acquiringPct  Decimal?
+  commissionPct Decimal?
+  deliveryRub   Decimal?
+  logisticsRub  Decimal?
+  firstMileRub  Decimal?
+  packagingRub  Decimal?
+  promoType     PromoType?
+  promoValue    Decimal?
+}
+
+model PriceSnapshot {
+  id         String   @id @default(cuid())
+  storeId    String
+  productId  String
+  priceRub   Decimal
+  currency   String   @default("RUB")
+  capturedAt DateTime @default(now())
+  store      Store    @relation(fields: [storeId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id])
+}
+
+model StockSnapshot {
+  id             String        @id @default(cuid())
+  storeId        String
+  sku            String
+  warehouseType  WarehouseType
+  freeToSell     Int
+  reserved       Int
+  capturedAt     DateTime      @default(now())
+  store          Store         @relation(fields: [storeId], references: [id])
+
+  @@index([storeId, sku, warehouseType])
+}
+
+model Posting {
+  id             String        @id @default(cuid())
+  storeId        String
+  postingNumber  String
+  scheme         PostingScheme
+  status         String
+  inProcessAt    DateTime?
+  shippedAt      DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime      @default(now())
+  store          Store         @relation(fields: [storeId], references: [id])
+  items          PostingItem[]
+
+  @@unique([storeId, postingNumber])
+}
+
+model PostingItem {
+  id        String   @id @default(cuid())
+  postingId String
+  productId String?
+  offerId   String
+  sku       String
+  qty       Int
+  priceRub  Decimal
+  posting   Posting  @relation(fields: [postingId], references: [id])
+  product   Product? @relation(fields: [productId], references: [id])
+}
+
+model PostingPlanSnapshot {
+  id           String   @id @default(cuid())
+  postingNumber String
+  storeId      String
+  sku          String
+  qty          Int
+  priceRub     Decimal
+  costRub      Decimal
+  paramsJson   Json
+  computedJson Json
+  capturedAt   DateTime @default(now())
+  store        Store    @relation(fields: [storeId], references: [id])
+
+  @@index([storeId, postingNumber])
+}
+
+model TransactionOperation {
+  id            String   @id @default(cuid())
+  storeId       String
+  operationKey  String   @unique
+  postingNumber String?
+  operationDate DateTime
+  type          String
+  amountRub     Decimal
+  servicesJson  Json?
+  rawJson       Json
+  store         Store    @relation(fields: [storeId], references: [id])
+}
+
+model Page {
+  id              String   @id @default(cuid())
+  title           String
+  slug            String   @unique
+  markdownContent String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
