@@ -1,6 +1,12 @@
 from pydantic import BaseModel, Field
 
 
+class PriceLogEntryOut(BaseModel):
+    id: int
+    message: str
+    created_at: str
+
+
 class PriceRowOut(BaseModel):
     product_id: int
     offer_id: str
@@ -31,19 +37,33 @@ class PriceListOut(BaseModel):
     page: int
     page_size: int
     items: list[PriceRowOut]
+    logs: list[PriceLogEntryOut] = []
 
 
-class PriceUpdateIn(BaseModel):
-    product_id: int
+class PriceOfferUpdateIn(BaseModel):
+    offer_id: str
+    new_price: float = Field(gt=0)
+
+
+class PricePatchIn(BaseModel):
     new_price: float = Field(gt=0)
 
 
 class PricesBulkUpdateIn(BaseModel):
-    updates: list[PriceUpdateIn]
+    updates: list[PriceOfferUpdateIn]
 
 
 class PricesApplyMarkupIn(BaseModel):
     markup_percent: float
     min_price_markup_percent: float = 0
-    product_ids: list[int] | None = None
+    offer_ids: list[str] | None = None
+
+
+class PricesReloadIn(BaseModel):
+    store_id: int
+
+
+class PricesReloadOut(BaseModel):
+    status: str
+    message: str
 
