@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.entities import AuditLog, Marketplace, MarketplaceStore, Price, Product, StockSnapshot, User
+from app.services.marketplaces import OzonClient
+from app.services.sync import get_store_credentials
+
 from app.schemas.price import (
     PriceListOut,
     PriceLogEntryOut,
@@ -105,6 +108,104 @@ def _log_price_action(db: Session, user_id: int, action: str, details: dict):
     )
 
 
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == '':
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_str(value, default: str = '') -> str:
+    if value is None:
+        return default
+    return str(value).strip() or default
+
+
+def _upsert_products_and_prices(
+    db: Session,
+    store_id: int,
+    price_items: list[dict],
+    now: datetime,
+) -> tuple[int, int, int]:
+    offer_ids = list(dict.fromkeys(_to_str(item.get('offer_id')) for item in price_items if _to_str(item.get('offer_id'))))
+    if not offer_ids:
+        return 0, 0, 0
+
+    existing_products = db.scalars(
+        select(Product).where(Product.store_id == store_id, or_(Product.article.in_(offer_ids), Product.sku.in_(offer_ids)))
+    ).all()
+    products_by_offer: dict[str, Product] = {}
+    for product in existing_products:
+        if product.article:
+            products_by_offer[product.article] = product
+        if product.sku:
+            products_by_offer[product.sku] = product
+
+    created_products = 0
+    touched_product_ids: set[int] = set()
+
+    for item in price_items:
+        offer_id = _to_str(item.get('offer_id'))
+        if not offer_id:
+            continue
+        product_id = _to_str(item.get('product_id'))
+        title = _to_str(item.get('name'), default='Ozon product')
+
+        product = products_by_offer.get(offer_id)
+        if product is None:
+            product = Product(store_id=store_id, sku=offer_id, article=offer_id, title=title)
+            db.add(product)
+            db.flush()
+            products_by_offer[offer_id] = product
+            created_products += 1
+        else:
+            if title and product.title != title:
+                product.title = title
+            if product_id and product.sku != product_id:
+                product.sku = product_id
+            if not product.article:
+                product.article = offer_id
+
+        touched_product_ids.add(product.id)
+
+    existing_prices = db.scalars(select(Price).where(Price.product_id.in_(touched_product_ids))).all()
+    prices_by_product_id = {price.product_id: price for price in existing_prices}
+
+    created_prices = 0
+    for item in price_items:
+        offer_id = _to_str(item.get('offer_id'))
+        if not offer_id:
+            continue
+        product = products_by_offer.get(offer_id)
+        if product is None:
+            continue
+
+        price_payload = item.get('price') or {}
+        current_price = _to_float(price_payload.get('marketing_seller_price'), _to_float(price_payload.get('price')))
+        previous_price = _to_float(price_payload.get('old_price'), None)
+
+        price = prices_by_product_id.get(product.id)
+        if price is None:
+            db.add(
+                Price(
+                    product_id=product.id,
+                    current_price=current_price,
+                    previous_price=previous_price,
+                    updated_at=now,
+                )
+            )
+            created_prices += 1
+            continue
+
+        price.previous_price = previous_price if previous_price is not None else price.current_price
+        price.current_price = current_price
+        price.updated_at = now
+
+    return len(touched_product_ids), created_products, created_prices
+
+
 def _fetch_logs(db: Session, user_id: int, limit: int = 20) -> list[PriceLogEntryOut]:
     logs = db.scalars(
         select(AuditLog)
@@ -191,23 +292,38 @@ def reload_prices(
     if payload.store_id not in owned_store_ids:
         raise HTTPException(status_code=404, detail='Store not found')
 
+    store = db.scalar(select(MarketplaceStore).where(MarketplaceStore.id == payload.store_id))
+    if store is None or store.marketplace != Marketplace.ozon:
+        raise HTTPException(status_code=404, detail='Store not found')
+
+    credentials = get_store_credentials(db, payload.store_id)
+    client = OzonClient()
+
+    try:
+        offer_ids = client.fetch_all_offer_ids(credentials)
+        price_items = client.fetch_prices(credentials, offer_ids)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f'Failed to load prices from Ozon API: {exc}') from exc
+
     now = datetime.utcnow()
-    prices = db.scalars(
-        select(Price)
-        .join(Product, Product.id == Price.product_id)
-        .where(Product.store_id == payload.store_id)
-    ).all()
-    for price in prices:
-        price.updated_at = now
+    touched_items, created_products, created_prices = _upsert_products_and_prices(db, payload.store_id, price_items, now)
 
     _log_price_action(
         db,
         current_user.id,
         'reload',
-        {'store_id': payload.store_id, 'items': len(prices), 'at': now.isoformat()},
+        {
+            'store_id': payload.store_id,
+            'items': touched_items,
+            'created_products': created_products,
+            'created_prices': created_prices,
+            'fetched_offer_ids': len(offer_ids),
+            'fetched_price_items': len(price_items),
+            'at': now.isoformat(),
+        },
     )
     db.commit()
-    return PricesReloadOut(status='ok', message=f'Обновлено записей: {len(prices)}')
+    return PricesReloadOut(status='ok', message=f'Загружено товаров: {touched_items}, цен: {len(price_items)}')
 
 
 @router.patch('/{offer_id}', response_model=PriceRowOut)
