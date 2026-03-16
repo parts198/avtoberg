@@ -280,6 +280,8 @@ export default function PricesPage() {
           ...row,
           current_price: next,
           acquiring,
+          customer_delivery: row.customer_delivery,
+          logistics: row.logistics,
           promotion,
           ozon_commission_rub: commission,
           payout_to_seller: payout,
@@ -295,10 +297,10 @@ export default function PricesPage() {
     <>
       <div className="card">
         <h1>Цены OZON</h1>
-        <p>Упаковка: 40 ₽ · Продвижение: 1% от цены · Эквайринг: 1.9%.</p>
+        <p>Формулы берутся из Ozon API: эквайринг, доставка, логистика, комиссия и себестоимость.</p>
       </div>
 
-      <div className="card">
+      <div className="card prices-card">
         <div className="status-line">{status}</div>
         {error ? <p style={{ color: 'crimson' }}>{error}</p> : null}
 
@@ -418,7 +420,7 @@ export default function PricesPage() {
                       onChange={() => toggleSelection(row.offer_id)}
                     />
                   </td>
-                  <td>{row.offer_id}</td>
+                  <td title={row.title}>{row.offer_id}</td>
                   <td>{row.fbs}</td>
                   <td>{row.fbo}</td>
                   <td>{row.stock}</td>

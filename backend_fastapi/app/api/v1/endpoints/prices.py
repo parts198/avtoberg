@@ -38,17 +38,27 @@ DEFAULT_FBS_COST = 15.0
 
 def _build_price_row(product: Product, price: Price, stock: int = 0) -> PriceRowOut:
     current_price = float(price.current_price)
-    cost_price = float(price.previous_price) if price.previous_price else round(current_price * 0.7, 2)
+    ozon_data = price.ozon_data or {}
+    price_payload = ozon_data.get('price') or {}
+    commissions = ozon_data.get('commissions') or {}
 
-    acquiring = round(current_price * ACQUIRING_RATE, 2)
-    promotion = round(current_price * PROMOTION_RATE, 2)
-    ozon_commission_rub = round(current_price * DEFAULT_COMMISSION_PERCENT / 100, 2)
+    marketing_seller_price = _to_float(price_payload.get('marketing_seller_price'), current_price)
+    cost_price = _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else 0.0)
+    if cost_price <= 0:
+        cost_price = round(marketing_seller_price * 0.7, 2)
+
+    acquiring = round(_to_float(ozon_data.get('acquiring'), marketing_seller_price * ACQUIRING_RATE), 2)
+    customer_delivery = round(_to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY), 2)
+    logistics = round(_to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS), 2)
+    ozon_commission_percent = round(_to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT), 2)
+    promotion = round(marketing_seller_price * PROMOTION_RATE, 2)
+    ozon_commission_rub = round(marketing_seller_price * ozon_commission_percent / 100, 2)
     fbs_cost = round(DEFAULT_FBS_COST, 2)
     payout_to_seller = round(
-        current_price
+        marketing_seller_price
         - acquiring
-        - DEFAULT_CUSTOMER_DELIVERY
-        - DEFAULT_LOGISTICS
+        - customer_delivery
+        - logistics
         - DEFAULT_FIRST_MILE
         - PACKAGING_COST
         - promotion
@@ -57,8 +67,8 @@ def _build_price_row(product: Product, price: Price, stock: int = 0) -> PriceRow
         2,
     )
     margin_rub = round(payout_to_seller - cost_price, 2)
-    margin_percent = round((margin_rub / current_price) * 100, 2) if current_price else 0.0
-    markup_percent = round(((current_price - cost_price) / cost_price) * 100, 2) if cost_price else 0.0
+    margin_percent = round((margin_rub / marketing_seller_price) * 100, 2) if marketing_seller_price else 0.0
+    markup_percent = round(((marketing_seller_price - cost_price) / cost_price) * 100, 2) if cost_price else 0.0
 
     return PriceRowOut(
         product_id=product.id,
@@ -67,15 +77,15 @@ def _build_price_row(product: Product, price: Price, stock: int = 0) -> PriceRow
         stock=stock,
         fbs=0,
         fbo=0,
-        current_price=current_price,
+        current_price=marketing_seller_price,
         previous_price=price.previous_price,
         acquiring=acquiring,
-        customer_delivery=DEFAULT_CUSTOMER_DELIVERY,
-        logistics=DEFAULT_LOGISTICS,
+        customer_delivery=customer_delivery,
+        logistics=logistics,
         first_mile=DEFAULT_FIRST_MILE,
         packaging=PACKAGING_COST,
         promotion=promotion,
-        ozon_commission_percent=DEFAULT_COMMISSION_PERCENT,
+        ozon_commission_percent=ozon_commission_percent,
         ozon_commission_rub=ozon_commission_rub,
         cost_price=cost_price,
         fbs_cost=fbs_cost,
@@ -193,6 +203,7 @@ def _upsert_products_and_prices(
                     product_id=product.id,
                     current_price=current_price,
                     previous_price=previous_price,
+                    ozon_data=item,
                     updated_at=now,
                 )
             )
@@ -201,6 +212,7 @@ def _upsert_products_and_prices(
 
         price.previous_price = previous_price if previous_price is not None else price.current_price
         price.current_price = current_price
+        price.ozon_data = item
         price.updated_at = now
 
     return len(touched_product_ids), created_products, created_prices
