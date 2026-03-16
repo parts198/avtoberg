@@ -48,3 +48,53 @@ button {
   background: #111827;
   color: #fff;
 }
+
+.status-line {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.prices-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.prices-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.prices-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1500px;
+}
+
+.prices-table th,
+.prices-table td {
+  border: 1px solid var(--line);
+  padding: 8px;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.prices-table th {
+  background: #f3f4f6;
+}
+
+.prices-pager {
+  margin-top: 12px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
