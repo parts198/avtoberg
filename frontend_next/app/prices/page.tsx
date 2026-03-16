@@ -1,8 +1,20 @@
 'use client'
 
-import { FormEvent, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 
-import { apiFetch } from '@/lib/api'
+import { apiFetch, getToken } from '@/lib/api'
+
+type Store = {
+  id: number
+  name: string
+  marketplace: 'ozon' | 'wildberries'
+}
+
+type PriceLogEntry = {
+  id: number
+  message: string
+  created_at: string
+}
 
 type PriceRow = {
   product_id: number
@@ -12,7 +24,6 @@ type PriceRow = {
   fbs: number
   fbo: number
   current_price: number
-  previous_price: number | null
   acquiring: number
   customer_delivery: number
   logistics: number
@@ -34,40 +45,68 @@ type PriceListResponse = {
   page: number
   page_size: number
   items: PriceRow[]
+  logs: PriceLogEntry[]
 }
 
 const PAGE_SIZES = [100, 500, 1000, 5000]
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
 
 const money = (value: number) => `${value.toFixed(2)} ₽`
 const pct = (value: number) => `${value.toFixed(2)}%`
 
 export default function PricesPage() {
+  const [stores, setStores] = useState<Store[]>([])
+  const [storeId, setStoreId] = useState<number | null>(null)
   const [rows, setRows] = useState<PriceRow[]>([])
+  const [logs, setLogs] = useState<PriceLogEntry[]>([])
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(100)
   const [total, setTotal] = useState(0)
   const [search, setSearch] = useState('')
-  const [sortBy, setSortBy] = useState<'price' | 'offer_id'>('price')
+  const [sortBy, setSortBy] = useState<'stock' | 'price' | 'offer_id'>('stock')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
   const [markup, setMarkup] = useState('25')
   const [minMarkup, setMinMarkup] = useState('5')
-  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [status, setStatus] = useState('Готов к работе')
   const [error, setError] = useState('')
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   const selectedCount = useMemo(
-    () => rows.filter((r) => selectedIds.includes(r.product_id)).length,
+    () => rows.filter((r) => selectedIds.includes(r.offer_id)).length,
     [rows, selectedIds],
   )
 
+  useEffect(() => {
+    void loadStores()
+  }, [])
+
+  async function loadStores() {
+    try {
+      const data = await apiFetch<Store[]>('/stores')
+      const ozonStores = data.filter((store) => store.marketplace === 'ozon')
+      setStores(ozonStores)
+      if (ozonStores.length) {
+        setStoreId((prev) => prev ?? ozonStores[0].id)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки магазинов')
+    }
+  }
+
   async function loadPrices(nextPage = page, nextPageSize = pageSize, e?: FormEvent) {
     e?.preventDefault()
+    if (!storeId) {
+      setError('Выберите магазин')
+      return
+    }
+
     setStatus('Загружаем данные...')
     setError('')
 
     const query = new URLSearchParams({
+      store_id: String(storeId),
       page: String(nextPage),
       page_size: String(nextPageSize),
       sort_by: sortBy,
@@ -80,18 +119,37 @@ export default function PricesPage() {
     try {
       const data = await apiFetch<PriceListResponse>(`/prices?${query.toString()}`)
       setRows(data.items)
+      setLogs(data.logs)
       setTotal(data.total)
       setPage(data.page)
       setPageSize(data.page_size)
       setSelectedIds([])
-      setStatus(`Загружено ${data.items.length} записей`) 
+      setStatus(`Загружено ${data.items.length} записей`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки цен')
       setStatus('Ошибка загрузки')
     }
   }
 
+  async function reloadData() {
+    if (!storeId) return
+    setStatus('Обновляем данные...')
+    setError('')
+
+    try {
+      await apiFetch('/prices/reload', {
+        method: 'POST',
+        body: JSON.stringify({ store_id: storeId }),
+      })
+      await loadPrices(1, pageSize)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка обновления данных')
+      setStatus('Ошибка обновления данных')
+    }
+  }
+
   async function applyMarkupToAll() {
+    if (!storeId) return
     const markupValue = Number(markup)
     const minMarkupValue = Number(minMarkup)
     if (!Number.isFinite(markupValue) || !Number.isFinite(minMarkupValue)) {
@@ -103,100 +161,120 @@ export default function PricesPage() {
     setError('')
 
     try {
-      await apiFetch<PriceListResponse>('/prices/apply-markup', {
+      await apiFetch<PriceListResponse>(`/prices/apply-markup?store_id=${storeId}`, {
         method: 'POST',
         body: JSON.stringify({
           markup_percent: markupValue,
           min_price_markup_percent: minMarkupValue,
         }),
       })
-      setStatus('Наценка применена')
-      await loadPrices(1, pageSize)
+      await loadPrices(page, pageSize)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка применения наценки')
       setStatus('Ошибка применения наценки')
     }
   }
 
-  async function updateSelected() {
-    if (!selectedIds.length) {
-      setError('Выберите хотя бы один товар')
-      return
-    }
-
-    setStatus('Обновляем выбранные позиции...')
-    setError('')
+  async function updateSingle(offerId: string) {
+    if (!storeId) return
+    const row = rows.find((item) => item.offer_id === offerId)
+    if (!row) return
 
     try {
-      const updates = rows
-        .filter((row) => selectedIds.includes(row.product_id))
-        .map((row) => ({ product_id: row.product_id, new_price: row.current_price }))
+      await apiFetch(`/prices/${encodeURIComponent(offerId)}?store_id=${storeId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ new_price: row.current_price }),
+      })
+      await loadPrices(page, pageSize)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка обновления позиции')
+    }
+  }
 
-      await apiFetch<PriceListResponse>('/prices/bulk-update', {
+  async function updateBulk(offerIds: string[]) {
+    if (!storeId || !offerIds.length) return
+    const updates = rows
+      .filter((row) => offerIds.includes(row.offer_id))
+      .map((row) => ({ offer_id: row.offer_id, new_price: row.current_price }))
+
+    if (!updates.length) return
+
+    try {
+      await apiFetch(`/prices/bulk-update?store_id=${storeId}`, {
         method: 'POST',
         body: JSON.stringify({ updates }),
       })
-
-      setStatus(`Обновлено товаров: ${updates.length}`)
       await loadPrices(page, pageSize)
+      setStatus(`Обновлено товаров: ${updates.length}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка обновления выбранных')
+      setError(err instanceof Error ? err.message : 'Ошибка массового обновления')
       setStatus('Ошибка обновления')
     }
   }
 
-  async function updateAll() {
-    if (!rows.length) {
-      setError('Нет данных для обновления')
-      return
-    }
-
-    setStatus('Обновляем все позиции на листе...')
+  async function exportXlsx() {
+    if (!storeId) return
     setError('')
 
     try {
-      const updates = rows.map((row) => ({ product_id: row.product_id, new_price: row.current_price }))
-      await apiFetch<PriceListResponse>('/prices/bulk-update', {
-        method: 'POST',
-        body: JSON.stringify({ updates }),
+      const token = getToken()
+      const query = new URLSearchParams({ store_id: String(storeId) })
+      if (search.trim()) query.set('search', search.trim())
+      const response = await fetch(`${API_URL}/prices/export-xlsx?${query.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
-      setStatus(`Обновлено товаров: ${updates.length}`)
-      await loadPrices(page, pageSize)
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'ozon-prices.xlsx'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка обновления всех')
-      setStatus('Ошибка обновления')
+      setError(err instanceof Error ? err.message : 'Ошибка экспорта XLSX')
     }
   }
 
-  function toggleSelection(productId: number) {
+  function toggleSelection(offerId: string) {
     setSelectedIds((prev) =>
-      prev.includes(productId) ? prev.filter((id) => id !== productId) : [...prev, productId],
+      prev.includes(offerId) ? prev.filter((id) => id !== offerId) : [...prev, offerId],
     )
   }
 
-  function setPrice(productId: number, value: string) {
+  function setPrice(offerId: string, value: string) {
     const next = Number(value)
+    if (!Number.isFinite(next) || next <= 0) return
+
     setRows((prev) =>
       prev.map((row) => {
-        if (row.product_id !== productId) return row
-        if (!Number.isFinite(next) || next <= 0) return row
+        if (row.offer_id !== offerId) return row
         const acquiring = Number((next * 0.019).toFixed(2))
         const promotion = Number((next * 0.01).toFixed(2))
-        const commission = Number((next * row.ozon_commission_percent / 100).toFixed(2))
-        const payout = Number((
-          next -
-          acquiring -
-          row.customer_delivery -
-          row.logistics -
-          row.first_mile -
-          row.packaging -
-          promotion -
-          commission -
-          row.fbs_cost
-        ).toFixed(2))
+        const commission = Number(((next * row.ozon_commission_percent) / 100).toFixed(2))
+        const payout = Number(
+          (
+            next -
+            acquiring -
+            row.customer_delivery -
+            row.logistics -
+            row.first_mile -
+            row.packaging -
+            promotion -
+            commission -
+            row.fbs_cost
+          ).toFixed(2),
+        )
         const marginRub = Number((payout - row.cost_price).toFixed(2))
-        const marginPercent = Number(((marginRub / next) * 100).toFixed(2))
-        const markupPercent = Number((((next - row.cost_price) / row.cost_price) * 100).toFixed(2))
+        const marginPercent = next ? Number(((marginRub / next) * 100).toFixed(2)) : 0
+        const markupPercent = row.cost_price
+          ? Number((((next - row.cost_price) / row.cost_price) * 100).toFixed(2))
+          : 0
 
         return {
           ...row,
@@ -224,14 +302,29 @@ export default function PricesPage() {
         <div className="status-line">{status}</div>
         {error ? <p style={{ color: 'crimson' }}>{error}</p> : null}
 
-        <form className="prices-toolbar" onSubmit={(e) => loadPrices(1, pageSize, e)}>
+        <form className="prices-toolbar" onSubmit={(e) => void loadPrices(1, pageSize, e)}>
+          <select
+            value={storeId ?? ''}
+            onChange={(e) => setStoreId(Number(e.target.value))}
+            aria-label="Выбор магазина"
+          >
+            <option value="" disabled>
+              Выберите магазин
+            </option>
+            {stores.map((store) => (
+              <option key={store.id} value={store.id}>
+                {store.name}
+              </option>
+            ))}
+          </select>
           <input
             type="search"
-            placeholder="Фильтр по артикулу / SKU"
+            placeholder="Фильтр по артикулу"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <button type="submit">Обновить данные</button>
+          <button type="button" onClick={reloadData}>Обновить данные</button>
+          <button type="submit">Загрузить цены</button>
 
           <label>
             Товаров на листе
@@ -253,7 +346,8 @@ export default function PricesPage() {
 
           <label>
             Сортировка
-            <select value={sortBy} onChange={(e) => setSortBy(e.target.value as 'price' | 'offer_id')}>
+            <select value={sortBy} onChange={(e) => setSortBy(e.target.value as 'stock' | 'price' | 'offer_id')}>
+              <option value="stock">Остаток</option>
               <option value="price">Цена</option>
               <option value="offer_id">Артикул</option>
             </select>
@@ -272,9 +366,20 @@ export default function PricesPage() {
           <input value={markup} onChange={(e) => setMarkup(e.target.value)} type="number" step="0.01" placeholder="Наценка, %" />
           <input value={minMarkup} onChange={(e) => setMinMarkup(e.target.value)} type="number" step="0.01" placeholder="Мин. наценка, %" />
           <button type="button" onClick={applyMarkupToAll}>Применить ко всем</button>
-          <button type="button" onClick={updateSelected}>Обновить выбранные ({selectedCount})</button>
-          <button type="button" onClick={updateAll}>Обновить все на листе</button>
+          <button type="button" onClick={() => void updateBulk(selectedIds)}>Обновить выбранные ({selectedCount})</button>
+          <button type="button" onClick={() => void updateBulk(rows.map((r) => r.offer_id))}>Обновить все на листе</button>
+          <button type="button" onClick={exportXlsx}>Скачать XLSX</button>
         </div>
+
+        <details className="log-panel">
+          <summary>Лог запросов</summary>
+          <div className="log-entries">
+            {logs.map((log) => (
+              <div key={log.id}>{new Date(log.created_at).toLocaleString()} · {log.message}</div>
+            ))}
+            {!logs.length ? <div>Логи пока пустые</div> : null}
+          </div>
+        </details>
 
         <div className="table-wrap">
           <table className="prices-table">
@@ -282,7 +387,6 @@ export default function PricesPage() {
               <tr>
                 <th></th>
                 <th>Артикул</th>
-                <th>Наименование</th>
                 <th>FBS</th>
                 <th>FBO</th>
                 <th>Остаток</th>
@@ -294,13 +398,14 @@ export default function PricesPage() {
                 <th>Упаковка</th>
                 <th>Продвижение</th>
                 <th>Комиссия %</th>
-                <th>Комиссия ₽</th>
+                <th>Комиссия руб</th>
                 <th>Себестоимость</th>
-                <th>FBS затраты</th>
+                <th>Затраты на FBS</th>
                 <th>К выплате</th>
                 <th>Наценка</th>
                 <th>Маржа</th>
                 <th>Маржинальность</th>
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody>
@@ -309,12 +414,11 @@ export default function PricesPage() {
                   <td>
                     <input
                       type="checkbox"
-                      checked={selectedIds.includes(row.product_id)}
-                      onChange={() => toggleSelection(row.product_id)}
+                      checked={selectedIds.includes(row.offer_id)}
+                      onChange={() => toggleSelection(row.offer_id)}
                     />
                   </td>
                   <td>{row.offer_id}</td>
-                  <td>{row.title}</td>
                   <td>{row.fbs}</td>
                   <td>{row.fbo}</td>
                   <td>{row.stock}</td>
@@ -323,7 +427,7 @@ export default function PricesPage() {
                       value={row.current_price}
                       type="number"
                       step="0.01"
-                      onChange={(e) => setPrice(row.product_id, e.target.value)}
+                      onChange={(e) => setPrice(row.offer_id, e.target.value)}
                       style={{ width: 96 }}
                     />
                   </td>
@@ -341,6 +445,9 @@ export default function PricesPage() {
                   <td>{pct(row.markup_percent)}</td>
                   <td>{money(row.margin_rub)}</td>
                   <td>{pct(row.margin_percent)}</td>
+                  <td>
+                    <button type="button" onClick={() => void updateSingle(row.offer_id)}>Обновить</button>
+                  </td>
                 </tr>
               ))}
               {!rows.length ? (
