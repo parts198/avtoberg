@@ -65,6 +65,62 @@ class OzonClient(MarketplaceClient):
             data = response.json()
         return data.get('result', {}).get('postings', [])
 
+    def fetch_all_offer_ids(self, credentials: dict[str, str]) -> list[str]:
+        offer_ids: list[str] = []
+        limit = 100
+        last_id = ''
+        guard = 0
+
+        with httpx.Client(timeout=30) as client:
+            while guard < 200:
+                guard += 1
+                response = client.post(
+                    f'{self.base_url}/v3/product/list',
+                    headers=self._headers(credentials),
+                    json={'filter': {'visibility': 'ALL'}, 'last_id': last_id, 'limit': limit},
+                )
+                response.raise_for_status()
+                data = response.json()
+                items = data.get('result', {}).get('items', [])
+
+                offer_ids.extend(str(item.get('offer_id') or '').strip() for item in items)
+                offer_ids = [offer_id for offer_id in offer_ids if offer_id]
+
+                next_last_id = data.get('result', {}).get('last_id') or ''
+                if not next_last_id or next_last_id == last_id or not items:
+                    break
+
+                last_id = str(next_last_id)
+
+        # keep order, remove duplicates
+        return list(dict.fromkeys(offer_ids))
+
+    def fetch_prices(self, credentials: dict[str, str], offer_ids: list[str]) -> list[dict]:
+        if not offer_ids:
+            return []
+
+        chunk_size = 100
+        items: list[dict] = []
+
+        with httpx.Client(timeout=40) as client:
+            for idx in range(0, len(offer_ids), chunk_size):
+                chunk = offer_ids[idx : idx + chunk_size]
+                response = client.post(
+                    f'{self.base_url}/v5/product/info/prices',
+                    headers=self._headers(credentials),
+                    json={
+                        'filter': {'offer_id': chunk, 'visibility': 'ALL'},
+                        'limit': len(chunk),
+                        'cursor': '',
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload.get('items'), list):
+                    items.extend(payload['items'])
+
+        return items
+
 
 class WildberriesClient(MarketplaceClient):
     orders_url = 'https://statistics-api.wildberries.ru/api/v1/supplier/orders'
