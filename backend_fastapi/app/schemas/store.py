@@ -16,6 +16,10 @@ class StoreUpdateIn(BaseModel):
     is_enabled: bool | None = None
 
 
+class StoreCredentialsUpdateIn(BaseModel):
+    credentials: dict[str, str]
+
+
 class StoreOut(BaseModel):
     id: int
     name: str

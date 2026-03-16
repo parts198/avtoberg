@@ -19,6 +19,8 @@ export default function StoresPage() {
   const [stores, setStores] = useState<Store[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [actionStoreId, setActionStoreId] = useState<number | null>(null)
 
   const [name, setName] = useState('')
   const [marketplace, setMarketplace] = useState<'ozon' | 'wildberries'>('ozon')
@@ -54,7 +56,9 @@ export default function StoresPage() {
 
   async function createStore(e: FormEvent) {
     e.preventDefault()
+    if (submitting) return
     setError('')
+    setSubmitting(true)
 
     const credentials =
       marketplace === 'ozon'
@@ -70,9 +74,63 @@ export default function StoresPage() {
       setClientId('')
       setApiKey('')
       setWbToken('')
-      loadStores()
+      await loadStores()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка создания магазина')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function deleteStore(store: Store) {
+    if (actionStoreId !== null) return
+    const confirmed = window.confirm(`Удалить магазин «${store.name}»?`)
+    if (!confirmed) return
+
+    setError('')
+    setActionStoreId(store.id)
+    try {
+      await apiFetch(`/stores/${store.id}`, { method: 'DELETE' })
+      await loadStores()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка удаления магазина')
+    } finally {
+      setActionStoreId(null)
+    }
+  }
+
+  async function updateCredentials(store: Store) {
+    if (actionStoreId !== null) return
+
+    const credentials =
+      store.marketplace === 'ozon'
+        ? (() => {
+            const nextClientId = window.prompt('Новый Ozon Client ID', '')
+            if (!nextClientId) return null
+            const nextApiKey = window.prompt('Новый Ozon API Key', '')
+            if (!nextApiKey) return null
+            return { client_id: nextClientId, api_key: nextApiKey }
+          })()
+        : (() => {
+            const nextToken = window.prompt('Новый WB Token', '')
+            if (!nextToken) return null
+            return { token: nextToken }
+          })()
+
+    if (!credentials) return
+
+    setError('')
+    setActionStoreId(store.id)
+    try {
+      await apiFetch(`/stores/${store.id}/credentials`, {
+        method: 'PATCH',
+        body: JSON.stringify({ credentials }),
+      })
+      await loadStores()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка обновления ключей')
+    } finally {
+      setActionStoreId(null)
     }
   }
 
@@ -86,23 +144,23 @@ export default function StoresPage() {
       <div className="card">
         <h2>Добавить магазин</h2>
         <form onSubmit={createStore} className="grid" style={{ maxWidth: 520 }}>
-          <input placeholder="Название магазина" value={name} onChange={(e) => setName(e.target.value)} required />
-          <select value={marketplace} onChange={(e) => setMarketplace(e.target.value as 'ozon' | 'wildberries')}>
+          <input placeholder="Название магазина" value={name} onChange={(e) => setName(e.target.value)} required disabled={submitting} />
+          <select value={marketplace} onChange={(e) => setMarketplace(e.target.value as 'ozon' | 'wildberries')} disabled={submitting}>
             <option value="ozon">Ozon</option>
             <option value="wildberries">Wildberries</option>
           </select>
 
           {marketplace === 'ozon' ? (
             <>
-              <input placeholder="Ozon Client ID" value={clientId} onChange={(e) => setClientId(e.target.value)} required />
-              <input placeholder="Ozon API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required />
+              <input placeholder="Ozon Client ID" value={clientId} onChange={(e) => setClientId(e.target.value)} required disabled={submitting} />
+              <input placeholder="Ozon API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required disabled={submitting} />
             </>
           ) : (
-            <input placeholder="WB Token" value={wbToken} onChange={(e) => setWbToken(e.target.value)} required />
+            <input placeholder="WB Token" value={wbToken} onChange={(e) => setWbToken(e.target.value)} required disabled={submitting} />
           )}
 
           {error ? <p style={{ color: 'crimson' }}>{error}</p> : null}
-          <button type="submit">Сохранить и проверить подключение</button>
+          <button type="submit" disabled={submitting}>{submitting ? 'Сохраняем...' : 'Сохранить и проверить подключение'}</button>
         </form>
       </div>
 
@@ -115,6 +173,14 @@ export default function StoresPage() {
               <b>{store.name}</b> ({store.marketplace})
               <p>Статус: {store.connection_status}</p>
               <p>Последняя синхронизация: {store.last_sync_at || 'ещё не было'}</p>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" onClick={() => updateCredentials(store)} disabled={actionStoreId !== null}>
+                  Изменить ключи
+                </button>
+                <button type="button" onClick={() => deleteStore(store)} disabled={actionStoreId !== null}>
+                  Удалить
+                </button>
+              </div>
             </div>
           ))}
           {!stores.length && !loading ? <p>Пока нет магазинов.</p> : null}
