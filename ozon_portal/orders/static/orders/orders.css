@@ -1,0 +1,34 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; background: #f5f7fb; color: #202636; }
+.orders-page { max-width: 1200px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+.topbar { display: flex; justify-content: space-between; align-items: center; }
+.card { background: #fff; border-radius: 12px; padding: 14px; border: 1px solid #e3e7ee; }
+.filters-grid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 12px; }
+label { display: grid; gap: 6px; font-size: 14px; }
+input, select, button { font: inherit; }
+input, select { border: 1px solid #d4d9e2; border-radius: 8px; padding: 8px; }
+.btn { border: 1px solid #c9d1de; background: #fff; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.btn-primary { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.actions-row { margin-top: 10px; display: flex; gap: 10px; }
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; }
+.summary-item { background: #fff; border: 1px solid #e3e7ee; border-radius: 12px; padding: 12px; }
+.summary-item .label { font-size: 12px; color: #657085; }
+.summary-item .value { font-size: 24px; font-weight: 600; }
+.table-wrap { width: 100%; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 900px; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #eef1f6; vertical-align: top; }
+.details-row td { background: #fbfcfe; }
+.items-table { width: 100%; border-collapse: collapse; }
+.items-table th, .items-table td { border-bottom: 1px solid #edf0f5; padding: 6px; font-size: 13px; }
+.muted { color: #687387; }
+.hidden { display: none; }
+.totals { display: flex; gap: 14px; flex-wrap: wrap; }
+@media (max-width: 960px) {
+  .filters-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .summary-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+}
+@media (max-width: 560px) {
+  .filters-grid { grid-template-columns: 1fr; }
+  .summary-grid { grid-template-columns: 1fr; }
+}
