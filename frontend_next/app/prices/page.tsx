@@ -49,10 +49,62 @@ type PriceListResponse = {
 }
 
 const PAGE_SIZES = [100, 500, 1000, 5000]
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api/v1'
 
 const money = (value: number) => `${value.toFixed(2)} ₽`
 const pct = (value: number) => `${value.toFixed(2)}%`
+
+function recalcRow(row: PriceRow, next: { price?: number; markup?: number; cost?: number }): PriceRow {
+  const currentPrice = next.price ?? row.current_price
+  const costPrice = next.cost ?? row.cost_price
+  const customerDelivery = row.customer_delivery
+  const logistics = row.logistics
+  const firstMile = row.first_mile
+  const packaging = row.packaging
+  const fbsCost = row.fbs_cost
+  const commissionPercent = row.ozon_commission_percent
+
+  const denominator = 1 - 0.019 - 0.01 - commissionPercent / 100
+  const priceFromMarkup = (markupValue: number) => {
+    if (denominator <= 0) return currentPrice
+    const payoutTarget = costPrice * (1 + markupValue / 100)
+    return Number(((payoutTarget + customerDelivery + logistics + firstMile + packaging + fbsCost) / denominator).toFixed(2))
+  }
+
+  const effectivePrice = next.markup !== undefined ? priceFromMarkup(next.markup) : currentPrice
+  const acquiring = Number((effectivePrice * 0.019).toFixed(2))
+  const promotion = Number((effectivePrice * 0.01).toFixed(2))
+  const commission = Number(((effectivePrice * commissionPercent) / 100).toFixed(2))
+  const payout = Number(
+    (
+      effectivePrice -
+      acquiring -
+      customerDelivery -
+      logistics -
+      firstMile -
+      packaging -
+      promotion -
+      commission -
+      fbsCost
+    ).toFixed(2),
+  )
+  const markupPercent = costPrice ? Number((((payout / costPrice) - 1) * 100).toFixed(2)) : 0
+  const marginRub = Number((payout - costPrice).toFixed(2))
+  const marginPercent = effectivePrice ? Number(((marginRub / effectivePrice) * 100).toFixed(2)) : 0
+
+  return {
+    ...row,
+    current_price: effectivePrice,
+    cost_price: costPrice,
+    acquiring,
+    promotion,
+    ozon_commission_rub: commission,
+    payout_to_seller: payout,
+    markup_percent: markupPercent,
+    margin_rub: marginRub,
+    margin_percent: marginPercent,
+  }
+}
 
 export default function PricesPage() {
   const [stores, setStores] = useState<Store[]>([])
@@ -183,9 +235,10 @@ export default function PricesPage() {
     try {
       await apiFetch(`/prices/${encodeURIComponent(offerId)}?store_id=${storeId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ new_price: row.current_price }),
+        body: JSON.stringify({ new_price: row.current_price, markup_percent: row.markup_percent, cost_price: row.cost_price }),
       })
       await loadPrices(page, pageSize)
+      setStatus(`Позиция ${offerId} обновлена в Ozon и перечитана`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка обновления позиции')
     }
@@ -251,46 +304,21 @@ export default function PricesPage() {
     const next = Number(value)
     if (!Number.isFinite(next) || next <= 0) return
 
-    setRows((prev) =>
-      prev.map((row) => {
-        if (row.offer_id !== offerId) return row
-        const acquiring = Number((next * 0.019).toFixed(2))
-        const promotion = Number((next * 0.01).toFixed(2))
-        const commission = Number(((next * row.ozon_commission_percent) / 100).toFixed(2))
-        const payout = Number(
-          (
-            next -
-            acquiring -
-            row.customer_delivery -
-            row.logistics -
-            row.first_mile -
-            row.packaging -
-            promotion -
-            commission -
-            row.fbs_cost
-          ).toFixed(2),
-        )
-        const marginRub = Number((payout - row.cost_price).toFixed(2))
-        const marginPercent = next ? Number(((marginRub / next) * 100).toFixed(2)) : 0
-        const markupPercent = row.cost_price
-          ? Number((((next - row.cost_price) / row.cost_price) * 100).toFixed(2))
-          : 0
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { price: next }) : row)))
+  }
 
-        return {
-          ...row,
-          current_price: next,
-          acquiring,
-          customer_delivery: row.customer_delivery,
-          logistics: row.logistics,
-          promotion,
-          ozon_commission_rub: commission,
-          payout_to_seller: payout,
-          margin_rub: marginRub,
-          margin_percent: marginPercent,
-          markup_percent: markupPercent,
-        }
-      }),
-    )
+  function setMarkupValue(offerId: string, value: string) {
+    const next = Number(value)
+    if (!Number.isFinite(next)) return
+
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { markup: next }) : row)))
+  }
+
+  function setCostPrice(offerId: string, value: string) {
+    const next = Number(value)
+    if (!Number.isFinite(next) || next < 0) return
+
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { cost: next }) : row)))
   }
 
   return (
@@ -441,10 +469,26 @@ export default function PricesPage() {
                   <td>{money(row.promotion)}</td>
                   <td>{pct(row.ozon_commission_percent)}</td>
                   <td>{money(row.ozon_commission_rub)}</td>
-                  <td>{money(row.cost_price)}</td>
+                  <td>
+                    <input
+                      value={row.cost_price}
+                      type="number"
+                      step="0.01"
+                      onChange={(e) => setCostPrice(row.offer_id, e.target.value)}
+                      style={{ width: 96 }}
+                    />
+                  </td>
                   <td>{money(row.fbs_cost)}</td>
                   <td>{money(row.payout_to_seller)}</td>
-                  <td>{pct(row.markup_percent)}</td>
+                  <td>
+                    <input
+                      value={row.markup_percent}
+                      type="number"
+                      step="0.01"
+                      onChange={(e) => setMarkupValue(row.offer_id, e.target.value)}
+                      style={{ width: 96 }}
+                    />
+                  </td>
                   <td>{money(row.margin_rub)}</td>
                   <td>{pct(row.margin_percent)}</td>
                   <td>

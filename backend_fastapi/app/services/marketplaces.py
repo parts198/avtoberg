@@ -121,6 +121,54 @@ class OzonClient(MarketplaceClient):
 
         return items
 
+    def fetch_stocks(self, credentials: dict[str, str], offer_ids: list[str]) -> dict[str, dict[str, int]]:
+        if not offer_ids:
+            return {}
+
+        chunk_size = 100
+        stocks: dict[str, dict[str, int]] = {}
+
+        with httpx.Client(timeout=40) as client:
+            for idx in range(0, len(offer_ids), chunk_size):
+                chunk = offer_ids[idx : idx + chunk_size]
+                response = client.post(
+                    f'{self.base_url}/v4/product/info/stocks',
+                    headers=self._headers(credentials),
+                    json={'filter': {'offer_id': chunk, 'visibility': 'ALL'}, 'limit': len(chunk)},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                items = payload.get('result', {}).get('items', [])
+
+                for item in items:
+                    offer_id = str(item.get('offer_id') or item.get('offerId') or '').strip()
+                    if not offer_id:
+                        continue
+
+                    fbs_stock = 0
+                    fbo_stock = 0
+                    for stock_item in item.get('stocks') or []:
+                        stock_type = str(stock_item.get('type') or '').lower()
+                        present = int(stock_item.get('present') or 0)
+                        if stock_type in {'fbs', 'rfbs'}:
+                            fbs_stock += present
+                        elif stock_type == 'fbo':
+                            fbo_stock += present
+
+                    stocks[offer_id] = {'fbs': fbs_stock, 'fbo': fbo_stock}
+
+        return stocks
+
+    def import_prices(self, credentials: dict[str, str], prices: list[dict]) -> dict:
+        with httpx.Client(timeout=40) as client:
+            response = client.post(
+                f'{self.base_url}/v1/product/import/prices',
+                headers=self._headers(credentials),
+                json={'prices': prices},
+            )
+            response.raise_for_status()
+            return response.json()
+
 
 class WildberriesClient(MarketplaceClient):
     orders_url = 'https://statistics-api.wildberries.ru/api/v1/supplier/orders'

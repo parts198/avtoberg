@@ -47,6 +47,8 @@ class PriceOfferUpdateIn(BaseModel):
 
 class PricePatchIn(BaseModel):
     new_price: float = Field(gt=0)
+    cost_price: float | None = Field(default=None, ge=0)
+    markup_percent: float | None = None
 
 
 class PricesBulkUpdateIn(BaseModel):
