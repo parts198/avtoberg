@@ -424,26 +424,26 @@ export default function PricesPage() {
           <table className="prices-table">
             <thead>
               <tr>
-                <th></th>
-                <th>Артикул</th>
-                <th>FBS</th>
-                <th>FBO</th>
-                <th>Остаток</th>
-                <th>Цена</th>
-                <th>Эквайринг</th>
-                <th>Доставка</th>
-                <th>Логистика</th>
-                <th>Упаковка</th>
-                <th>Продвижение %</th>
-                <th>Продвижение, ₽</th>
-                <th>Комиссия %</th>
-                <th>Комиссия ₽</th>
-                <th>Себестоимость</th>
-                <th>Затраты FBS</th>
-                <th>К выплате</th>
-                <th>Наценка</th>
-                <th>Маржа</th>
-                <th>Действия</th>
+                <th aria-label="Выбор строки"></th>
+                <th><span className="th-label">Артикул</span></th>
+                <th><span className="th-label">FBS</span></th>
+                <th><span className="th-label">FBO</span></th>
+                <th><span className="th-label">Остаток</span></th>
+                <th><span className="th-label">Цена</span></th>
+                <th><span className="th-label">Эквайринг</span></th>
+                <th><span className="th-label">Доставка</span></th>
+                <th><span className="th-label">Логистика</span></th>
+                <th><span className="th-label">Упаковка</span></th>
+                <th><span className="th-label">Продвижение %</span></th>
+                <th><span className="th-label">Продвижение, ₽</span></th>
+                <th><span className="th-label">Комиссия %</span></th>
+                <th><span className="th-label">Комиссия ₽</span></th>
+                <th><span className="th-label">Себестоимость</span></th>
+                <th><span className="th-label">Затраты FBS</span></th>
+                <th><span className="th-label">К выплате</span></th>
+                <th><span className="th-label">Наценка</span></th>
+                <th><span className="th-label">Маржа</span></th>
+                <th><span className="th-label">Действия</span></th>
               </tr>
             </thead>
             <tbody>
