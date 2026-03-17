@@ -75,47 +75,65 @@ button {
 
 .table-wrap {
   overflow-x: auto;
+  max-height: 70vh;
   border: 1px solid var(--line);
   border-radius: 12px;
 }
 
 .prices-table {
   width: 100%;
-  border-collapse: collapse;
-  min-width: 1180px;
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 980px;
 }
 
 .prices-table th,
 .prices-table td {
-  border: 1px solid var(--line);
-  padding: 6px 8px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 4px 6px;
   text-align: left;
   white-space: normal;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.2;
+  vertical-align: top;
+  min-width: 52px;
 }
 
-.prices-table th {
+.prices-table thead th {
   background: #f3f4f6;
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 3;
+}
+
+.prices-table thead th:first-child,
+.prices-table tbody td:first-child {
+  min-width: 38px;
+  width: 38px;
+}
+
+.prices-table tr > :first-child {
+  border-left: 1px solid var(--line);
+}
+
+.prices-table thead tr:first-child th {
+  border-top: 1px solid var(--line);
 }
 
 .prices-table tbody tr:nth-child(even) {
   background: #fafafa;
 }
 
-.prices-table th {
-  max-width: 110px;
-  overflow: hidden;
+.th-label {
   display: -webkit-box;
+  overflow: hidden;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
 
 .prices-table input {
-  padding: 4px 6px;
+  padding: 3px 5px;
 }
 
 .prices-pager {
