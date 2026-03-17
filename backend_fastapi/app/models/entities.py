@@ -75,6 +75,7 @@ class Price(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey('products.id'), index=True)
     current_price: Mapped[float] = mapped_column(Float)
     previous_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_price: Mapped[float] = mapped_column(Float, default=0)
     ozon_data: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
