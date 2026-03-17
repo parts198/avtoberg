@@ -30,6 +30,7 @@ type PriceRow = {
   first_mile: number
   packaging: number
   promotion: number
+  promotion_percent: number
   ozon_commission_percent: number
   ozon_commission_rub: number
   cost_price: number
@@ -49,10 +50,76 @@ type PriceListResponse = {
 }
 
 const PAGE_SIZES = [100, 500, 1000, 5000]
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api/v1'
 
 const money = (value: number) => `${value.toFixed(2)} ₽`
 const pct = (value: number) => `${value.toFixed(2)}%`
+
+function recalcRow(row: PriceRow, next: { price?: number; markup?: number; cost?: number; promotionPercent?: number; packaging?: number }): PriceRow {
+  const currentPrice = next.price ?? row.current_price
+  const costPrice = next.cost ?? row.cost_price
+  const customerDelivery = row.customer_delivery
+  const logistics = row.logistics
+  const firstMile = row.first_mile
+  const packaging = next.packaging ?? row.packaging
+  const fbsCost = row.fbs_cost
+  const commissionPercent = row.ozon_commission_percent
+  const promotionPercent = next.promotionPercent ?? row.promotion_percent
+
+  const denominator = 1 - 0.019 - promotionPercent / 100 - commissionPercent / 100
+  const priceFromMarkup = (markupValue: number) => {
+    if (denominator <= 0) return currentPrice
+    const payoutTarget = costPrice * (1 + markupValue / 100)
+    return Number(((payoutTarget + customerDelivery + logistics + firstMile + packaging + fbsCost) / denominator).toFixed(2))
+  }
+
+  const effectivePrice = next.markup !== undefined ? priceFromMarkup(next.markup) : currentPrice
+  const acquiring = Number((effectivePrice * 0.019).toFixed(2))
+  const promotion = Number(((effectivePrice * promotionPercent) / 100).toFixed(2))
+  const commission = Number(((effectivePrice * commissionPercent) / 100).toFixed(2))
+  const payout = Number(
+    (
+      effectivePrice -
+      acquiring -
+      customerDelivery -
+      logistics -
+      firstMile -
+      packaging -
+      promotion -
+      commission -
+      fbsCost
+    ).toFixed(2),
+  )
+  const markupPercent = costPrice ? Number((((payout / costPrice) - 1) * 100).toFixed(2)) : 0
+  const marginRub = Number((payout - costPrice).toFixed(2))
+  const marginPercent = effectivePrice ? Number(((marginRub / effectivePrice) * 100).toFixed(2)) : 0
+
+  return {
+    ...row,
+    current_price: effectivePrice,
+    cost_price: costPrice,
+    acquiring,
+    promotion,
+    ozon_commission_rub: commission,
+    payout_to_seller: payout,
+    promotion_percent: promotionPercent,
+    markup_percent: markupPercent,
+    margin_rub: marginRub,
+    margin_percent: marginPercent,
+  }
+}
+
+
+function humanizePriceError(message: string): string {
+  const lower = message.toLowerCase()
+  if (lower.includes('не удалось отправить цену в ozon') || lower.includes('не удалось обновить цены в ozon')) {
+    return 'Не удалось обновить цену в Ozon. Проверьте API-ключи магазина и права на изменение цен.'
+  }
+  if (lower.includes('403')) {
+    return 'Ozon вернул 403 Forbidden. Проверьте Client-Id / Api-Key и доступ к методу изменения цен.'
+  }
+  return message
+}
 
 export default function PricesPage() {
   const [stores, setStores] = useState<Store[]>([])
@@ -183,11 +250,18 @@ export default function PricesPage() {
     try {
       await apiFetch(`/prices/${encodeURIComponent(offerId)}?store_id=${storeId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ new_price: row.current_price }),
+        body: JSON.stringify({
+          new_price: row.current_price,
+          markup_percent: row.markup_percent,
+          cost_price: row.cost_price,
+          promotion_percent: row.promotion_percent,
+          packaging: row.packaging,
+        }),
       })
       await loadPrices(page, pageSize)
+      setStatus(`Позиция ${offerId} обновлена в Ozon и перечитана`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка обновления позиции')
+      setError(err instanceof Error ? humanizePriceError(err.message) : 'Ошибка обновления позиции')
     }
   }
 
@@ -207,7 +281,7 @@ export default function PricesPage() {
       await loadPrices(page, pageSize)
       setStatus(`Обновлено товаров: ${updates.length}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка массового обновления')
+      setError(err instanceof Error ? humanizePriceError(err.message) : 'Ошибка массового обновления')
       setStatus('Ошибка обновления')
     }
   }
@@ -251,46 +325,35 @@ export default function PricesPage() {
     const next = Number(value)
     if (!Number.isFinite(next) || next <= 0) return
 
-    setRows((prev) =>
-      prev.map((row) => {
-        if (row.offer_id !== offerId) return row
-        const acquiring = Number((next * 0.019).toFixed(2))
-        const promotion = Number((next * 0.01).toFixed(2))
-        const commission = Number(((next * row.ozon_commission_percent) / 100).toFixed(2))
-        const payout = Number(
-          (
-            next -
-            acquiring -
-            row.customer_delivery -
-            row.logistics -
-            row.first_mile -
-            row.packaging -
-            promotion -
-            commission -
-            row.fbs_cost
-          ).toFixed(2),
-        )
-        const marginRub = Number((payout - row.cost_price).toFixed(2))
-        const marginPercent = next ? Number(((marginRub / next) * 100).toFixed(2)) : 0
-        const markupPercent = row.cost_price
-          ? Number((((next - row.cost_price) / row.cost_price) * 100).toFixed(2))
-          : 0
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { price: next }) : row)))
+  }
 
-        return {
-          ...row,
-          current_price: next,
-          acquiring,
-          customer_delivery: row.customer_delivery,
-          logistics: row.logistics,
-          promotion,
-          ozon_commission_rub: commission,
-          payout_to_seller: payout,
-          margin_rub: marginRub,
-          margin_percent: marginPercent,
-          markup_percent: markupPercent,
-        }
-      }),
-    )
+  function setMarkupValue(offerId: string, value: string) {
+    const next = Number(value)
+    if (!Number.isFinite(next)) return
+
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { markup: next }) : row)))
+  }
+
+  function setCostPrice(offerId: string, value: string) {
+    const next = Number(value)
+    if (!Number.isFinite(next) || next < 0) return
+
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { cost: next }) : row)))
+  }
+
+  function setPromotionPercent(offerId: string, value: string) {
+    const next = Number(value)
+    if (!Number.isFinite(next) || next < 0) return
+
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { promotionPercent: next }) : row)))
+  }
+
+  function setPackagingCost(offerId: string, value: string) {
+    const next = Number(value)
+    if (!Number.isFinite(next) || next < 0) return
+
+    setRows((prev) => prev.map((row) => (row.offer_id === offerId ? recalcRow(row, { packaging: next }) : row)))
   }
 
   return (
@@ -396,8 +459,8 @@ export default function PricesPage() {
                 <th>Эквайринг</th>
                 <th>Доставка</th>
                 <th>Логистика</th>
-                <th>Первая миля</th>
                 <th>Упаковка</th>
+                <th>Продвижение %</th>
                 <th>Продвижение</th>
                 <th>Комиссия %</th>
                 <th>Комиссия руб</th>
@@ -406,7 +469,6 @@ export default function PricesPage() {
                 <th>К выплате</th>
                 <th>Наценка</th>
                 <th>Маржа</th>
-                <th>Маржинальность</th>
                 <th>Действия</th>
               </tr>
             </thead>
@@ -436,17 +498,48 @@ export default function PricesPage() {
                   <td>{money(row.acquiring)}</td>
                   <td>{money(row.customer_delivery)}</td>
                   <td>{money(row.logistics)}</td>
-                  <td>{money(row.first_mile)}</td>
-                  <td>{money(row.packaging)}</td>
+                  <td>
+                    <input
+                      value={row.packaging}
+                      type="number"
+                      step="0.01"
+                      onChange={(e) => setPackagingCost(row.offer_id, e.target.value)}
+                      style={{ width: 96 }}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      value={row.promotion_percent}
+                      type="number"
+                      step="0.01"
+                      onChange={(e) => setPromotionPercent(row.offer_id, e.target.value)}
+                      style={{ width: 96 }}
+                    />
+                  </td>
                   <td>{money(row.promotion)}</td>
                   <td>{pct(row.ozon_commission_percent)}</td>
                   <td>{money(row.ozon_commission_rub)}</td>
-                  <td>{money(row.cost_price)}</td>
+                  <td>
+                    <input
+                      value={row.cost_price}
+                      type="number"
+                      step="0.01"
+                      onChange={(e) => setCostPrice(row.offer_id, e.target.value)}
+                      style={{ width: 96 }}
+                    />
+                  </td>
                   <td>{money(row.fbs_cost)}</td>
                   <td>{money(row.payout_to_seller)}</td>
-                  <td>{pct(row.markup_percent)}</td>
+                  <td>
+                    <input
+                      value={row.markup_percent}
+                      type="number"
+                      step="0.01"
+                      onChange={(e) => setMarkupValue(row.offer_id, e.target.value)}
+                      style={{ width: 96 }}
+                    />
+                  </td>
                   <td>{money(row.margin_rub)}</td>
-                  <td>{pct(row.margin_percent)}</td>
                   <td>
                     <button type="button" onClick={() => void updateSingle(row.offer_id)}>Обновить</button>
                   </td>
@@ -454,7 +547,7 @@ export default function PricesPage() {
               ))}
               {!rows.length ? (
                 <tr>
-                  <td colSpan={21}>Нажмите «Обновить данные», чтобы загрузить цены.</td>
+                  <td colSpan={20}>Нажмите «Обновить данные», чтобы загрузить цены.</td>
                 </tr>
               ) : null}
             </tbody>

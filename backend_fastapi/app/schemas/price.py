@@ -22,6 +22,7 @@ class PriceRowOut(BaseModel):
     first_mile: float
     packaging: float
     promotion: float
+    promotion_percent: float
     ozon_commission_percent: float
     ozon_commission_rub: float
     cost_price: float
@@ -47,6 +48,10 @@ class PriceOfferUpdateIn(BaseModel):
 
 class PricePatchIn(BaseModel):
     new_price: float = Field(gt=0)
+    cost_price: float | None = Field(default=None, ge=0)
+    markup_percent: float | None = None
+    promotion_percent: float | None = Field(default=None, ge=0)
+    packaging: float | None = Field(default=None, ge=0)
 
 
 class PricesBulkUpdateIn(BaseModel):

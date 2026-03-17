@@ -4,12 +4,12 @@ from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from sqlalchemy import func, literal_column, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.entities import AuditLog, Marketplace, MarketplaceStore, Price, Product, StockSnapshot, User
+from app.models.entities import AuditLog, Marketplace, MarketplaceStore, Price, Product, User
 from app.services.marketplaces import OzonClient
 from app.services.sync import get_store_credentials
 
@@ -36,63 +36,124 @@ DEFAULT_FIRST_MILE = 12.0
 DEFAULT_FBS_COST = 15.0
 
 
-def _build_price_row(product: Product, price: Price, stock: int = 0) -> PriceRowOut:
-    current_price = float(price.current_price)
-    ozon_data = price.ozon_data or {}
-    price_payload = ozon_data.get('price') or {}
-    commissions = ozon_data.get('commissions') or {}
+def _calculate_price_metrics(
+    current_price: float,
+    cost_price: float,
+    customer_delivery: float,
+    logistics: float,
+    first_mile: float,
+    packaging: float,
+    promotion_percent: float,
+    ozon_commission_percent: float,
+    fbs_cost: float,
+) -> dict[str, float]:
+    current_price = round(max(current_price, 0.0), 2)
+    cost_price = round(max(cost_price, 0.0), 2)
 
-    marketing_seller_price = _to_float(price_payload.get('marketing_seller_price'), current_price)
-    cost_price = _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else 0.0)
-    if cost_price <= 0:
-        cost_price = round(marketing_seller_price * 0.7, 2)
-
-    acquiring = round(_to_float(ozon_data.get('acquiring'), marketing_seller_price * ACQUIRING_RATE), 2)
-    customer_delivery = round(_to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY), 2)
-    logistics = round(_to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS), 2)
-    ozon_commission_percent = round(_to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT), 2)
-    promotion = round(marketing_seller_price * PROMOTION_RATE, 2)
-    ozon_commission_rub = round(marketing_seller_price * ozon_commission_percent / 100, 2)
-    fbs_cost = round(DEFAULT_FBS_COST, 2)
+    acquiring = round(current_price * ACQUIRING_RATE, 2)
+    promotion_rate = promotion_percent / 100
+    promotion = round(current_price * promotion_rate, 2)
+    ozon_commission_rub = round(current_price * ozon_commission_percent / 100, 2)
     payout_to_seller = round(
-        marketing_seller_price
+        current_price
         - acquiring
         - customer_delivery
         - logistics
-        - DEFAULT_FIRST_MILE
-        - PACKAGING_COST
+        - first_mile
+        - packaging
         - promotion
         - ozon_commission_rub
         - fbs_cost,
         2,
     )
     margin_rub = round(payout_to_seller - cost_price, 2)
-    margin_percent = round((margin_rub / marketing_seller_price) * 100, 2) if marketing_seller_price else 0.0
-    markup_percent = round(((marketing_seller_price - cost_price) / cost_price) * 100, 2) if cost_price else 0.0
+    margin_percent = round((margin_rub / current_price) * 100, 2) if current_price else 0.0
+    markup_percent = round(((payout_to_seller / cost_price) - 1) * 100, 2) if cost_price else 0.0
+
+    return {
+        'acquiring': acquiring,
+        'promotion': promotion,
+        'ozon_commission_rub': ozon_commission_rub,
+        'payout_to_seller': payout_to_seller,
+        'margin_rub': margin_rub,
+        'margin_percent': margin_percent,
+        'markup_percent': markup_percent,
+    }
+
+
+def _calculate_price_from_markup(
+    markup_percent: float,
+    cost_price: float,
+    customer_delivery: float,
+    logistics: float,
+    first_mile: float,
+    packaging: float,
+    promotion_percent: float,
+    ozon_commission_percent: float,
+    fbs_cost: float,
+) -> float:
+    promotion_rate = promotion_percent / 100
+    denominator = 1 - ACQUIRING_RATE - promotion_rate - (ozon_commission_percent / 100)
+    if denominator <= 0:
+        return 0.0
+    payout_target = cost_price * (1 + markup_percent / 100)
+    return round((payout_target + customer_delivery + logistics + first_mile + packaging + fbs_cost) / denominator, 2)
+
+
+def _build_price_row(product: Product, price: Price, stock: int = 0, fbs: int = 0, fbo: int = 0) -> PriceRowOut:
+    current_price = float(price.current_price)
+    ozon_data = price.ozon_data or {}
+    price_payload = ozon_data.get('price') or {}
+    commissions = ozon_data.get('commissions') or {}
+    overrides = ozon_data.get('local_overrides') or {}
+
+    marketing_seller_price = _to_float(price_payload.get('marketing_seller_price'), current_price)
+    cost_price = _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else 0.0)
+    if cost_price <= 0:
+        cost_price = round(marketing_seller_price * 0.7, 2)
+
+    customer_delivery = round(_to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY), 2)
+    logistics = round(_to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS), 2)
+    ozon_commission_percent = round(_to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT), 2)
+    fbs_cost = round(DEFAULT_FBS_COST, 2)
+    packaging = round(_to_float(overrides.get('packaging'), PACKAGING_COST), 2)
+    promotion_percent = round(_to_float(overrides.get('promotion_percent'), PROMOTION_RATE * 100), 2)
+    metrics = _calculate_price_metrics(
+        marketing_seller_price,
+        cost_price,
+        customer_delivery,
+        logistics,
+        DEFAULT_FIRST_MILE,
+        packaging,
+        promotion_percent,
+        ozon_commission_percent,
+        fbs_cost,
+    )
 
     return PriceRowOut(
         product_id=product.id,
         offer_id=product.article or product.sku,
         title=product.title,
         stock=stock,
-        fbs=0,
-        fbo=0,
+        fbs=fbs,
+        fbo=fbo,
         current_price=marketing_seller_price,
         previous_price=price.previous_price,
-        acquiring=acquiring,
+        acquiring=metrics['acquiring'],
         customer_delivery=customer_delivery,
         logistics=logistics,
         first_mile=DEFAULT_FIRST_MILE,
-        packaging=PACKAGING_COST,
-        promotion=promotion,
+        packaging=packaging,
+        promotion=metrics['promotion'],
+        promotion_percent=promotion_percent,
         ozon_commission_percent=ozon_commission_percent,
-        ozon_commission_rub=ozon_commission_rub,
+        ozon_commission_rub=metrics['ozon_commission_rub'],
         cost_price=cost_price,
         fbs_cost=fbs_cost,
-        payout_to_seller=payout_to_seller,
-        markup_percent=markup_percent,
-        margin_rub=margin_rub,
-        margin_percent=margin_percent,
+        payout_to_seller=metrics['payout_to_seller'],
+        markup_percent=metrics['markup_percent'],
+        margin_rub=metrics['margin_rub'],
+        margin_percent=metrics['margin_percent'],
     )
 
 
@@ -236,17 +297,9 @@ def _fetch_logs(db: Session, user_id: int, limit: int = 20) -> list[PriceLogEntr
 
 
 def _prices_query(db: Session, store_id: int, search: str | None):
-    stock_subquery = (
-        select(StockSnapshot.product_id, func.sum(StockSnapshot.marketplace_stock).label('stock'))
-        .where(StockSnapshot.store_id == store_id)
-        .group_by(StockSnapshot.product_id)
-        .subquery()
-    )
-
     q = (
-        select(Product, Price, func.coalesce(stock_subquery.c.stock, 0).label('stock'))
+        select(Product, Price)
         .join(Price, Price.product_id == Product.id)
-        .outerjoin(stock_subquery, stock_subquery.c.product_id == Product.id)
         .where(Product.store_id == store_id)
     )
 
@@ -275,23 +328,35 @@ def list_prices(
     q = _prices_query(db, store_id, search)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
 
-    sort_column_map = {
-        'offer_id': Product.article,
-        'price': Price.current_price,
-        'stock': None,
-    }
-    sort_column = sort_column_map.get(sort_by)
-    if sort_by == 'stock':
-        stock_col = literal_column('stock')
-        q = q.order_by(stock_col.asc() if sort_order == 'asc' else stock_col.desc())
-    elif sort_column is not None:
-        q = q.order_by(sort_column.asc() if sort_order == 'asc' else sort_column.desc())
+    rows = db.execute(q).all()
 
-    rows = db.execute(q.offset((page - 1) * page_size).limit(page_size)).all()
-    items = [_build_price_row(product, price, stock) for product, price, stock in rows]
+    offer_ids = [product.article or product.sku for product, _price in rows]
+    credentials = get_store_credentials(db, store_id)
+    stocks_map: dict[str, dict[str, int]] = {}
+    try:
+        stocks_map = OzonClient().fetch_stocks(credentials, offer_ids)
+    except Exception:
+        stocks_map = {}
+
+    items: list[PriceRowOut] = []
+    for product, price in rows:
+        offer = product.article or product.sku
+        stock_data = stocks_map.get(offer, {'fbs': 0, 'fbo': 0})
+        fbs = int(stock_data.get('fbs', 0))
+        fbo = int(stock_data.get('fbo', 0))
+        items.append(_build_price_row(product, price, fbs + fbo, fbs, fbo))
+
+    if sort_by == 'price':
+        items.sort(key=lambda i: i.current_price, reverse=sort_order == 'desc')
+    elif sort_by == 'offer_id':
+        items.sort(key=lambda i: i.offer_id, reverse=sort_order == 'desc')
+    else:
+        items.sort(key=lambda i: i.stock, reverse=sort_order == 'desc')
+
+    paged_items = items[(page - 1) * page_size : (page - 1) * page_size + page_size]
 
     logs = _fetch_logs(db, current_user.id)
-    return PriceListOut(total=total, page=page, page_size=page_size, items=items, logs=logs)
+    return PriceListOut(total=total, page=page, page_size=page_size, items=paged_items, logs=logs)
 
 
 @router.post('/reload', response_model=PricesReloadOut)
@@ -362,15 +427,76 @@ def update_price(
         raise HTTPException(status_code=404, detail='Offer not found')
 
     product, price = row
+
+    store_credentials = get_store_credentials(db, store_id)
+    client = OzonClient()
+
+    ozon_data = price.ozon_data or {}
+    price_payload = ozon_data.get('price') or {}
+    commissions = ozon_data.get('commissions') or {}
+    cost_price = payload.cost_price if payload.cost_price is not None else _to_float(
+        price_payload.get('net_price'),
+        float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7,
+    )
+
+    promotion_percent = payload.promotion_percent if payload.promotion_percent is not None else _to_float(
+        (ozon_data.get('local_overrides') or {}).get('promotion_percent'),
+        PROMOTION_RATE * 100,
+    )
+    packaging = payload.packaging if payload.packaging is not None else _to_float(
+        (ozon_data.get('local_overrides') or {}).get('packaging'),
+        PACKAGING_COST,
+    )
+
+    target_price = payload.new_price
+    if payload.markup_percent is not None:
+        target_price = _calculate_price_from_markup(
+            payload.markup_percent,
+            cost_price,
+            _to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY),
+            _to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS),
+            DEFAULT_FIRST_MILE,
+            packaging,
+            promotion_percent,
+            _to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT),
+            DEFAULT_FBS_COST,
+        )
+
+    try:
+        client.import_prices(
+            store_credentials,
+            [
+                {
+                    'offer_id': product.article or product.sku,
+                    'price': f'{target_price:.2f}',
+                }
+            ],
+        )
+        refreshed = client.fetch_prices(store_credentials, [product.article or product.sku])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail='Не удалось отправить цену в Ozon. Проверьте доступы API (Client-Id/Api-Key) и права на изменение цен.',
+        ) from exc
+
+    fresh_item = refreshed[0] if refreshed else {'price': {'marketing_seller_price': target_price}}
+    fresh_price_payload = fresh_item.get('price') or {}
+    updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), payload.new_price)
+
     price.previous_price = price.current_price
-    price.current_price = payload.new_price
+    price.current_price = updated_price
+    if fresh_item:
+        fresh_item.setdefault('price', {})['net_price'] = cost_price
+        fresh_item.setdefault('local_overrides', {})['promotion_percent'] = promotion_percent
+        fresh_item.setdefault('local_overrides', {})['packaging'] = packaging
+    price.ozon_data = fresh_item or price.ozon_data
     price.updated_at = datetime.utcnow()
 
     _log_price_action(
         db,
         current_user.id,
         'patch',
-        {'store_id': store_id, 'offer_id': offer_id, 'new_price': payload.new_price},
+        {'store_id': store_id, 'offer_id': offer_id, 'new_price': payload.new_price, 'status': 'updated_in_ozon'},
     )
 
     db.commit()
@@ -402,14 +528,65 @@ def bulk_update_prices(
         )
     ).all()
 
-    updated_items: list[PriceRowOut] = []
-    for product, price in rows:
+    if not rows:
+        return PriceListOut(total=0, page=1, page_size=0, items=[], logs=_fetch_logs(db, current_user.id))
+
+    credentials = get_store_credentials(db, store_id)
+    client = OzonClient()
+
+    prices_payload: list[dict] = []
+    requested_offer_ids: list[str] = []
+    for product, _price in rows:
         offer = product.article or product.sku
+        if not offer:
+            continue
         next_price = updates_by_offer.get(offer)
         if next_price is None:
             continue
+        requested_offer_ids.append(offer)
+        prices_payload.append(
+            {
+                'offer_id': offer,
+                'price': f'{next_price:.2f}',
+            }
+        )
+
+    if not prices_payload:
+        return PriceListOut(total=0, page=1, page_size=0, items=[], logs=_fetch_logs(db, current_user.id))
+
+    try:
+        chunk_size = 1000
+        for idx in range(0, len(prices_payload), chunk_size):
+            client.import_prices(credentials, prices_payload[idx : idx + chunk_size])
+        refreshed_items = client.fetch_prices(credentials, requested_offer_ids)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail='Не удалось обновить цены в Ozon. Проверьте API-ключи и права на изменение цен.',
+        ) from exc
+
+    refreshed_by_offer: dict[str, dict] = {}
+    for item in refreshed_items:
+        offer = _to_str(item.get('offer_id'))
+        if offer:
+            refreshed_by_offer[offer] = item
+
+    updated_items: list[PriceRowOut] = []
+    for product, price in rows:
+        offer = product.article or product.sku
+        if not offer or offer not in updates_by_offer:
+            continue
+
+        fresh_item = refreshed_by_offer.get(offer)
+        if fresh_item:
+            fresh_price_payload = fresh_item.get('price') or {}
+            updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), updates_by_offer[offer])
+            price.ozon_data = fresh_item
+        else:
+            updated_price = updates_by_offer[offer]
+
         price.previous_price = price.current_price
-        price.current_price = next_price
+        price.current_price = updated_price
         price.updated_at = datetime.utcnow()
         updated_items.append(_build_price_row(product, price))
 
@@ -417,7 +594,7 @@ def bulk_update_prices(
         db,
         current_user.id,
         'bulk_update',
-        {'store_id': store_id, 'items': len(updated_items)},
+        {'store_id': store_id, 'items': len(updated_items), 'status': 'updated_in_ozon'},
     )
 
     db.commit()
@@ -462,8 +639,8 @@ def export_prices_xlsx(
         'Маржинальность',
     ])
 
-    for product, price, stock in rows:
-        r = _build_price_row(product, price, stock)
+    for product, price in rows:
+        r = _build_price_row(product, price)
         ws.append([
             r.offer_id,
             r.fbs,
@@ -520,9 +697,23 @@ def apply_markup(
 
     rows = db.execute(q).all()
     for product, price in rows:
-        base_cost = float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7
+        ozon_data = price.ozon_data or {}
+        source_price = ozon_data.get('price') or {}
+        base_cost = _to_float(source_price.get('net_price'), float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7)
+        commissions = ozon_data.get('commissions') or {}
+        overrides = ozon_data.get('local_overrides') or {}
         target_markup = max(payload.markup_percent, payload.min_price_markup_percent)
-        new_price = round(base_cost * (1 + target_markup / 100), 2)
+        new_price = _calculate_price_from_markup(
+            target_markup,
+            base_cost,
+            _to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY),
+            _to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS),
+            DEFAULT_FIRST_MILE,
+            _to_float(overrides.get('packaging'), PACKAGING_COST),
+            _to_float(overrides.get('promotion_percent'), PROMOTION_RATE * 100),
+            _to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT),
+            DEFAULT_FBS_COST,
+        )
         if new_price <= 0:
             continue
         price.previous_price = price.current_price
