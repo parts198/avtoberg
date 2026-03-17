@@ -138,7 +138,7 @@ class OzonClient(MarketplaceClient):
                 )
                 response.raise_for_status()
                 payload = response.json()
-                items = payload.get('result', {}).get('items', [])
+                items = payload.get('result', {}).get('items') or payload.get('items') or []
 
                 for item in items:
                     offer_id = str(item.get('offer_id') or item.get('offerId') or '').strip()
@@ -149,7 +149,12 @@ class OzonClient(MarketplaceClient):
                     fbo_stock = 0
                     for stock_item in item.get('stocks') or []:
                         stock_type = str(stock_item.get('type') or '').lower()
-                        present = int(stock_item.get('present') or 0)
+                        present = int(
+                            stock_item.get('present')
+                            or stock_item.get('available')
+                            or stock_item.get('marketplace_stock')
+                            or 0
+                        )
                         if stock_type in {'fbs', 'rfbs'}:
                             fbs_stock += present
                         elif stock_type == 'fbo':
@@ -166,6 +171,8 @@ class OzonClient(MarketplaceClient):
                 headers=self._headers(credentials),
                 json={'prices': prices},
             )
+            if response.status_code in {401, 403}:
+                raise RuntimeError('Нет доступа к обновлению цен в Ozon (проверьте Client-Id и Api-Key)')
             response.raise_for_status()
             return response.json()
 
