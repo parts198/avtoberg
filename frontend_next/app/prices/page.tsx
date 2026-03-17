@@ -1,6 +1,6 @@
 'use client'
 
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 
 import { apiFetch, getToken } from '@/lib/api'
 
@@ -127,6 +127,7 @@ export default function PricesPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [status, setStatus] = useState('Готов к работе')
   const [error, setError] = useState('')
+  const costFileInputRef = useRef<HTMLInputElement | null>(null)
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
@@ -300,6 +301,36 @@ export default function PricesPage() {
     }
   }
 
+  async function importCostXlsx(file: File) {
+    if (!storeId) return
+    setError('')
+    setStatus('Импортируем себестоимость...')
+
+    const token = getToken()
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      const response = await fetch(`${API_URL}/prices/import-cost-xlsx?store_id=${storeId}`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      })
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { detail?: string } | null
+        throw new Error(body?.detail || `HTTP ${response.status}`)
+      }
+      await loadPrices(page, pageSize)
+      setStatus('Себестоимость импортирована')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка импорта XLSX себестоимости')
+      setStatus('Ошибка импорта себестоимости')
+    } finally {
+      if (costFileInputRef.current) {
+        costFileInputRef.current.value = ''
+      }
+    }
+  }
+
   function toggleSelection(offerId: string) {
     setSelectedIds((prev) => (prev.includes(offerId) ? prev.filter((id) => id !== offerId) : [...prev, offerId]))
   }
@@ -408,6 +439,19 @@ export default function PricesPage() {
           <button type="button" onClick={() => void updateBulk(selectedIds)}>Обновить выбранные ({selectedCount})</button>
           <button type="button" onClick={() => void updateBulk(rows.map((r) => r.offer_id))}>Обновить все на листе</button>
           <button type="button" onClick={exportXlsx}>Скачать XLSX</button>
+          <button type="button" onClick={() => costFileInputRef.current?.click()}>Загрузить себестоимость XLSX</button>
+          <input
+            ref={costFileInputRef}
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) {
+                void importCostXlsx(file)
+              }
+            }}
+          />
         </div>
 
         <details className="log-panel">

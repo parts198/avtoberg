@@ -1,9 +1,9 @@
 from datetime import datetime
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -106,9 +106,10 @@ def _build_price_row(product: Product, price: Price, stock: int = 0, fbs: int = 
     commissions = ozon_data.get('commissions') or {}
 
     marketing_seller_price = _to_float(price_payload.get('marketing_seller_price'), current_price)
-    cost_price = _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else 0.0)
+    cost_price = _to_float(price.cost_price)
     if cost_price <= 0:
-        cost_price = round(marketing_seller_price * 0.7, 2)
+        fallback_cost = _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else 0.0)
+        cost_price = fallback_cost if fallback_cost > 0 else round(marketing_seller_price * 0.7, 2)
 
     customer_delivery = round(_to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY), 2)
     logistics = round(_to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS), 2)
@@ -259,11 +260,15 @@ def _upsert_products_and_prices(
 
         price = prices_by_product_id.get(product.id)
         if price is None:
+            cost_price = _to_float(price_payload.get('net_price'))
+            if cost_price <= 0:
+                cost_price = round(current_price * 0.7, 2)
             db.add(
                 Price(
                     product_id=product.id,
                     current_price=current_price,
                     previous_price=previous_price,
+                    cost_price=cost_price,
                     ozon_data=item,
                     updated_at=now,
                 )
@@ -273,6 +278,10 @@ def _upsert_products_and_prices(
 
         price.previous_price = previous_price if previous_price is not None else price.current_price
         price.current_price = current_price
+        if _to_float(price.cost_price) <= 0:
+            fallback_cost = _to_float(price_payload.get('net_price'))
+            if fallback_cost > 0:
+                price.cost_price = round(fallback_cost, 2)
         price.ozon_data = item
         price.updated_at = now
 
@@ -435,8 +444,8 @@ def update_price(
     price_payload = ozon_data.get('price') or {}
     commissions = ozon_data.get('commissions') or {}
     cost_price = payload.cost_price if payload.cost_price is not None else _to_float(
-        price_payload.get('net_price'),
-        float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7,
+        price.cost_price,
+        _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7),
     )
     packaging = payload.packaging if payload.packaging is not None else _to_float(ozon_data.get('packaging'), PACKAGING_COST)
     promotion_percent = payload.promotion_percent if payload.promotion_percent is not None else _to_float(
@@ -485,11 +494,11 @@ def update_price(
     price.previous_price = price.current_price
     price.current_price = updated_price
     if fresh_item:
-        fresh_item.setdefault('price', {})['net_price'] = cost_price
         fresh_item['promotion_percent'] = promotion_percent
         fresh_item['packaging'] = packaging
         fresh_item['first_mile'] = _to_float(ozon_data.get('first_mile'), DEFAULT_FIRST_MILE)
         fresh_item['fbs_cost'] = _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST)
+    price.cost_price = round(max(cost_price, 0.0), 2)
     price.ozon_data = fresh_item or price.ozon_data
     price.updated_at = datetime.utcnow()
 
@@ -708,7 +717,9 @@ def apply_markup(
     for _product, price in rows:
         ozon_data = price.ozon_data or {}
         source_price = ozon_data.get('price') or {}
-        base_cost = _to_float(source_price.get('net_price'), float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7)
+        base_cost = _to_float(price.cost_price)
+        if base_cost <= 0:
+            base_cost = _to_float(source_price.get('net_price'), float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7)
         commissions = ozon_data.get('commissions') or {}
         target_markup = max(payload.markup_percent, payload.min_price_markup_percent)
         new_price = _calculate_price_from_markup(
@@ -734,3 +745,78 @@ def apply_markup(
     refreshed = db.execute(q).all()
     items = [_build_price_row(product, price) for product, price in refreshed]
     return PriceListOut(total=len(items), page=1, page_size=len(items), items=items, logs=_fetch_logs(db, current_user.id))
+
+
+@router.post('/import-cost-xlsx', response_model=PricesReloadOut)
+def import_cost_price_xlsx(
+    store_id: int = Query(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owned_store_ids = _get_owned_ozon_store_ids(db, current_user.id)
+    if store_id not in owned_store_ids:
+        raise HTTPException(status_code=404, detail='Store not found')
+
+    if not file.filename or not file.filename.lower().endswith('.xlsx'):
+        raise HTTPException(status_code=400, detail='Нужен файл .xlsx')
+
+    try:
+        wb = load_workbook(filename=BytesIO(file.file.read()), data_only=True)
+        ws = wb.active
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail='Не удалось прочитать XLSX') from exc
+
+    rows_iter = ws.iter_rows(values_only=True)
+    headers = next(rows_iter, None)
+    if not headers:
+        raise HTTPException(status_code=400, detail='Файл пустой')
+
+    header_map = {str(col).strip().lower(): idx for idx, col in enumerate(headers) if col is not None}
+    offer_idx = header_map.get('offer_id')
+    cost_idx = header_map.get('cost_price')
+    if offer_idx is None or cost_idx is None:
+        raise HTTPException(status_code=400, detail='В XLSX нужны колонки offer_id и cost_price')
+
+    updates: dict[str, float] = {}
+    for values in rows_iter:
+        if not values:
+            continue
+        offer = _to_str(values[offer_idx] if offer_idx < len(values) else None)
+        if not offer:
+            continue
+        cost = _to_float(values[cost_idx] if cost_idx < len(values) else None, default=-1)
+        if cost < 0:
+            continue
+        updates[offer] = round(cost, 2)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail='Нет валидных строк для обновления')
+
+    matched_rows = db.execute(
+        select(Product, Price)
+        .join(Price, Price.product_id == Product.id)
+        .where(
+            Product.store_id == store_id,
+            or_(Product.article.in_(list(updates.keys())), Product.sku.in_(list(updates.keys()))),
+        )
+    ).all()
+
+    updated_count = 0
+    for product, price in matched_rows:
+        offer = product.article or product.sku
+        if not offer or offer not in updates:
+            continue
+        price.cost_price = updates[offer]
+        price.updated_at = datetime.utcnow()
+        updated_count += 1
+
+    _log_price_action(
+        db,
+        current_user.id,
+        'import_cost_xlsx',
+        {'store_id': store_id, 'rows_in_file': len(updates), 'updated_rows': updated_count},
+    )
+    db.commit()
+
+    return PricesReloadOut(status='ok', message=f'Обновлена себестоимость для {updated_count} товаров')
