@@ -303,6 +303,31 @@ def _price_matches_target(item: dict | None, target_price: float, target_min_pri
     return refreshed_price == round(target_price, 2) and refreshed_min_price == round(target_min_price, 2)
 
 
+def _extract_refreshed_cost_price(item: dict | None, fallback: float) -> float:
+    if not item:
+        return round(max(fallback, 0.0), 2)
+    price_payload = item.get('price') or {}
+    refreshed_cost = _to_float(price_payload.get('net_price'), fallback)
+    return round(max(refreshed_cost, 0.0), 2)
+
+
+def _build_ozon_price_payload(
+    offer_id: str,
+    price_payload: dict,
+    target_price: float,
+    target_min_price: float,
+    target_cost_price: float,
+) -> dict:
+    return {
+        'offer_id': offer_id,
+        'price': f'{target_price:.2f}',
+        'min_price': f'{target_min_price:.2f}',
+        'net_price': f'{round(max(target_cost_price, 0.0), 2):.2f}',
+        'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
+        'vat': _to_str(price_payload.get('vat'), '0.22'),
+    }
+
+
 def _fetch_price_with_retry(
     client: OzonClient,
     credentials: dict[str, str],
@@ -505,6 +530,8 @@ def update_price(
             _to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT),
             _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST),
         )
+        if payload.min_price is None:
+            target_min_price = target_price
 
     target_price = round(max(target_price, 1.0), 2)
     target_min_price = round(min(target_price, max(target_min_price, 1.0)), 2)
@@ -518,13 +545,13 @@ def update_price(
         client.import_prices(
             store_credentials,
             [
-                {
-                    'offer_id': product.article or product.sku,
-                    'price': f'{target_price:.2f}',
-                    'min_price': f'{target_min_price:.2f}',
-                    'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
-                    'vat': _to_str(price_payload.get('vat'), '0.22'),
-                }
+                _build_ozon_price_payload(
+                    product.article or product.sku,
+                    price_payload,
+                    target_price,
+                    target_min_price,
+                    cost_price,
+                )
             ],
         )
         accepted_by_ozon = True
@@ -544,15 +571,18 @@ def update_price(
     if refreshed_from_ozon:
         updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), target_price)
         updated_min_price = _to_float(fresh_price_payload.get('min_price'), target_min_price)
+        updated_cost_price = _extract_refreshed_cost_price(fresh_item, cost_price)
     else:
         updated_price = target_price
         updated_min_price = target_min_price
+        updated_cost_price = round(max(cost_price, 0.0), 2)
         effective_item = {
             **(fresh_item or ozon_data or {}),
             'price': {
                 **((fresh_item or ozon_data or {}).get('price') or {}),
                 'marketing_seller_price': f'{target_price:.2f}',
                 'min_price': f'{target_min_price:.2f}',
+                'net_price': f'{updated_cost_price:.2f}',
                 'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
                 'vat': _to_str(price_payload.get('vat'), '0.22'),
             },
@@ -566,7 +596,7 @@ def update_price(
         effective_item['packaging'] = packaging
         effective_item['first_mile'] = _to_float(ozon_data.get('first_mile'), DEFAULT_FIRST_MILE)
         effective_item['fbs_cost'] = _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST)
-    price.cost_price = round(max(cost_price, 0.0), 2)
+    price.cost_price = updated_cost_price
     price.ozon_data = effective_item or price.ozon_data
     price.updated_at = datetime.utcnow()
 
@@ -579,6 +609,7 @@ def update_price(
             'offer_id': offer_id,
             'new_price': target_price,
             'min_price': target_min_price,
+            'cost_price': updated_cost_price,
             'accepted_by_ozon': accepted_by_ozon,
             'refreshed_from_ozon': refreshed_from_ozon,
             'stale_after_refresh': stale_after_refresh,
@@ -618,6 +649,7 @@ def bulk_update_prices(
         u.offer_id: {
             'new_price': round(u.new_price, 2),
             'min_price': round(u.min_price, 2) if u.min_price is not None else None,
+            'cost_price': round(u.cost_price, 2) if u.cost_price is not None else None,
         }
         for u in payload.updates
     }
@@ -650,18 +682,25 @@ def bulk_update_prices(
         price_payload = ozon_data.get('price') or {}
         target_price = update_values['new_price']
         target_min_price = update_values['min_price']
+        target_cost_price = update_values['cost_price']
         if target_min_price is None:
             target_min_price = _to_float(_price.min_price, target_price)
         target_min_price = round(min(target_price, max(target_min_price, 1.0)), 2)
+        if target_cost_price is None:
+            target_cost_price = _to_float(
+                _price.cost_price,
+                _to_float(price_payload.get('net_price'), float(_price.previous_price) if _price.previous_price else float(_price.current_price) * 0.7),
+            )
         prices_payload.append(
-            {
-                'offer_id': offer,
-                'price': f'{target_price:.2f}',
-                'min_price': f'{target_min_price:.2f}',
-                'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
-                'vat': _to_str(price_payload.get('vat'), '0.22'),
-            }
+            _build_ozon_price_payload(
+                offer,
+                price_payload,
+                target_price,
+                target_min_price,
+                target_cost_price,
+            )
         )
+        update_values['cost_price'] = round(max(target_cost_price, 0.0), 2)
 
     if not prices_payload:
         return PriceListOut(total=0, page=1, page_size=0, items=[], logs=_fetch_logs(db, current_user.id))
@@ -672,7 +711,8 @@ def bulk_update_prices(
             client.import_prices(credentials, prices_payload[idx : idx + chunk_size])
         refreshed_items = client.fetch_prices(credentials, requested_offer_ids)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail='Не удалось обновить цены в Ozon') from exc
+        detail = _to_str(exc, 'Не удалось обновить цены в Ozon')
+        raise HTTPException(status_code=502, detail=detail) from exc
 
     refreshed_by_offer: dict[str, dict] = {}
     for item in refreshed_items:
@@ -691,15 +731,33 @@ def bulk_update_prices(
         if fresh_item:
             fresh_price_payload = fresh_item.get('price') or {}
             updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), target_values['new_price'])
-            updated_min_price = _to_float(fresh_price_payload.get('min_price'), target_values['min_price'] or price.min_price)
+            updated_min_price = _to_float(
+                fresh_price_payload.get('min_price'),
+                target_values['min_price'] if target_values['min_price'] is not None else price.min_price,
+            )
+            updated_cost_price = _extract_refreshed_cost_price(
+                fresh_item,
+                target_values['cost_price'] if target_values['cost_price'] is not None else _to_float(price.cost_price),
+            )
             price.ozon_data = fresh_item
         else:
             updated_price = target_values['new_price']
-            updated_min_price = target_values['min_price'] or price.min_price
+            updated_min_price = target_values['min_price'] if target_values['min_price'] is not None else price.min_price
+            updated_cost_price = round(max(_to_float(target_values['cost_price'], price.cost_price), 0.0), 2)
+            price.ozon_data = {
+                **(price.ozon_data or {}),
+                'price': {
+                    **((price.ozon_data or {}).get('price') or {}),
+                    'marketing_seller_price': f'{updated_price:.2f}',
+                    'min_price': f'{round(min(updated_price, max(_to_float(updated_min_price, updated_price), 1.0)), 2):.2f}',
+                    'net_price': f'{updated_cost_price:.2f}',
+                },
+            }
 
         price.previous_price = price.current_price
         price.current_price = updated_price
         price.min_price = round(min(updated_price, max(_to_float(updated_min_price, updated_price), 1.0)), 2)
+        price.cost_price = updated_cost_price
         price.updated_at = datetime.utcnow()
         updated_items.append(_build_price_row(product, price))
 

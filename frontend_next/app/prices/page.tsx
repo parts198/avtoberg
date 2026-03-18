@@ -89,7 +89,7 @@ function recalcRow(
   const markupPercent = costPrice ? Number((((payout / costPrice) - 1) * 100).toFixed(2)) : 0
   const marginRub = Number((payout - costPrice).toFixed(2))
   const marginPercent = effectivePrice ? Number(((marginRub / effectivePrice) * 100).toFixed(2)) : 0
-  const minPrice = Number(Math.min(row.min_price, effectivePrice).toFixed(2))
+  const minPrice = Number((next.markup !== undefined ? effectivePrice : Math.min(row.min_price, effectivePrice)).toFixed(2))
 
   return {
     ...row,
@@ -264,6 +264,7 @@ export default function PricesPage() {
       offer_id: row.offer_id,
       new_price: row.current_price,
       min_price: row.min_price,
+      cost_price: row.cost_price,
     }))
 
     if (!updates.length) return
