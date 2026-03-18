@@ -24,6 +24,7 @@ type PriceRow = {
   fbs: number
   fbo: number
   current_price: number
+  min_price: number
   acquiring: number
   customer_delivery: number
   logistics: number
@@ -88,10 +89,12 @@ function recalcRow(
   const markupPercent = costPrice ? Number((((payout / costPrice) - 1) * 100).toFixed(2)) : 0
   const marginRub = Number((payout - costPrice).toFixed(2))
   const marginPercent = effectivePrice ? Number(((marginRub / effectivePrice) * 100).toFixed(2)) : 0
+  const minPrice = Number(Math.min(row.min_price, effectivePrice).toFixed(2))
 
   return {
     ...row,
     current_price: effectivePrice,
+    min_price: minPrice,
     cost_price: costPrice,
     packaging,
     promotion_percent: promotionPercent,
@@ -240,6 +243,7 @@ export default function PricesPage() {
         method: 'PATCH',
         body: JSON.stringify({
           new_price: row.current_price,
+          min_price: row.min_price,
           markup_percent: row.markup_percent,
           cost_price: row.cost_price,
           promotion_percent: row.promotion_percent,
@@ -255,7 +259,11 @@ export default function PricesPage() {
 
   async function updateBulk(offerIds: string[]) {
     if (!storeId || !offerIds.length) return
-    const updates = rows.filter((row) => offerIds.includes(row.offer_id)).map((row) => ({ offer_id: row.offer_id, new_price: row.current_price }))
+    const updates = rows.filter((row) => offerIds.includes(row.offer_id)).map((row) => ({
+      offer_id: row.offer_id,
+      new_price: row.current_price,
+      min_price: row.min_price,
+    }))
 
     if (!updates.length) return
 
@@ -474,6 +482,7 @@ export default function PricesPage() {
                 <th><span className="th-label">FBO</span></th>
                 <th><span className="th-label">Остаток</span></th>
                 <th><span className="th-label">Цена</span></th>
+                <th><span className="th-label">Min price</span></th>
                 <th><span className="th-label">Эквайринг</span></th>
                 <th><span className="th-label">Доставка</span></th>
                 <th><span className="th-label">Логистика</span></th>
@@ -501,6 +510,7 @@ export default function PricesPage() {
                   <td>{row.fbo}</td>
                   <td>{row.stock}</td>
                   <td><input value={row.current_price} type="number" step="0.01" onChange={(e) => setPrice(row.offer_id, e.target.value)} style={{ width: 84 }} /></td>
+                  <td>{money(row.min_price)}</td>
                   <td>{money(row.acquiring)}</td>
                   <td>{money(row.customer_delivery)}</td>
                   <td>{money(row.logistics)}</td>
@@ -519,7 +529,7 @@ export default function PricesPage() {
               ))}
               {!rows.length ? (
                 <tr>
-                  <td colSpan={20}>Нажмите «Обновить данные», чтобы загрузить цены.</td>
+                  <td colSpan={21}>Нажмите «Обновить данные», чтобы загрузить цены.</td>
                 </tr>
               ) : null}
             </tbody>

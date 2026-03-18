@@ -15,6 +15,7 @@ class PriceRowOut(BaseModel):
     fbs: int = 0
     fbo: int = 0
     current_price: float
+    min_price: float
     previous_price: float | None = None
     acquiring: float
     customer_delivery: float
@@ -44,10 +45,12 @@ class PriceListOut(BaseModel):
 class PriceOfferUpdateIn(BaseModel):
     offer_id: str
     new_price: float = Field(gt=0)
+    min_price: float | None = Field(default=None, gt=0)
 
 
 class PricePatchIn(BaseModel):
     new_price: float = Field(gt=0)
+    min_price: float | None = Field(default=None, gt=0)
     cost_price: float | None = Field(default=None, ge=0)
     markup_percent: float | None = None
     promotion_percent: float | None = Field(default=None, ge=0)
