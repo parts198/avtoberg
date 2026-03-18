@@ -1,0 +1,105 @@
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.summaryBadge {
+  display: inline-block;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #e8f0ff;
+  color: #1f4eb2;
+  font-weight: 600;
+}
+
+.scopeNote {
+  margin: 8px 0 0;
+  color: #6b7280;
+}
+
+.error {
+  margin: 8px 0 0;
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.hourlyChart {
+  display: grid;
+  gap: 6px;
+}
+
+.hourRow {
+  display: grid;
+  grid-template-columns: 56px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+}
+
+.hourBar {
+  background: #e5e7eb;
+  height: 10px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.hourBarFill {
+  height: 100%;
+  background: #111827;
+}
+
+@media (max-width: 1200px) {
+  .filters {
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .filters,
+  .summaryGrid {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .filters,
+  .summaryGrid {
+    grid-template-columns: 1fr;
+  }
+}
