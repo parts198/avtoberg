@@ -245,6 +245,8 @@ class OzonClient(MarketplaceClient):
             response.raise_for_status()
             payload = response.json()
             self._raise_for_import_price_errors(payload)
+            if payload in ({}, None):
+                raise OzonImportPricesError('Ozon вернул пустой ответ на обновление цены')
             return payload
 
 

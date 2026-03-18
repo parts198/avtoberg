@@ -46,6 +46,7 @@ class PriceOfferUpdateIn(BaseModel):
     offer_id: str
     new_price: float = Field(gt=0)
     min_price: float | None = Field(default=None, gt=0)
+    cost_price: float | None = Field(default=None, ge=0)
 
 
 class PricePatchIn(BaseModel):
@@ -74,4 +75,3 @@ class PricesReloadIn(BaseModel):
 class PricesReloadOut(BaseModel):
     status: str
     message: str
-
