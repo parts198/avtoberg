@@ -101,11 +101,12 @@ def _calculate_price_from_markup(
 
 def _build_price_row(product: Product, price: Price, stock: int = 0, fbs: int = 0, fbo: int = 0) -> PriceRowOut:
     current_price = float(price.current_price)
+    min_price = round(max(_to_float(price.min_price, current_price), 0.0), 2)
     ozon_data = price.ozon_data or {}
     price_payload = ozon_data.get('price') or {}
     commissions = ozon_data.get('commissions') or {}
 
-    marketing_seller_price = _to_float(price_payload.get('marketing_seller_price'), current_price)
+    marketing_seller_price = round(max(current_price, 0.0), 2)
     cost_price = _to_float(price.cost_price)
     if cost_price <= 0:
         fallback_cost = _to_float(price_payload.get('net_price'), float(price.previous_price) if price.previous_price else 0.0)
@@ -139,6 +140,7 @@ def _build_price_row(product: Product, price: Price, stock: int = 0, fbs: int = 
         fbs=fbs,
         fbo=fbo,
         current_price=marketing_seller_price,
+        min_price=min_price,
         previous_price=price.previous_price,
         acquiring=metrics['acquiring'],
         customer_delivery=customer_delivery,
@@ -256,6 +258,7 @@ def _upsert_products_and_prices(
 
         price_payload = item.get('price') or {}
         current_price = _to_float(price_payload.get('marketing_seller_price'), _to_float(price_payload.get('price')))
+        min_price = _to_float(price_payload.get('min_price'), current_price)
         previous_price = _to_float(price_payload.get('old_price'), None)
 
         price = prices_by_product_id.get(product.id)
@@ -267,6 +270,7 @@ def _upsert_products_and_prices(
                 Price(
                     product_id=product.id,
                     current_price=current_price,
+                    min_price=min_price,
                     previous_price=previous_price,
                     cost_price=cost_price,
                     ozon_data=item,
@@ -278,6 +282,7 @@ def _upsert_products_and_prices(
 
         price.previous_price = previous_price if previous_price is not None else price.current_price
         price.current_price = current_price
+        price.min_price = min_price
         if _to_float(price.cost_price) <= 0:
             fallback_cost = _to_float(price_payload.get('net_price'))
             if fallback_cost > 0:
@@ -454,6 +459,7 @@ def update_price(
     )
 
     target_price = payload.new_price
+    target_min_price = round(max(payload.min_price if payload.min_price is not None else _to_float(price.min_price, payload.new_price), 1.0), 2)
     if payload.markup_percent is not None:
         target_price = _calculate_price_from_markup(
             payload.markup_percent,
@@ -467,6 +473,9 @@ def update_price(
             _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST),
         )
 
+    target_price = round(max(target_price, 1.0), 2)
+    target_min_price = round(min(target_price, max(target_min_price, 1.0)), 2)
+
     try:
         client.import_prices(
             store_credentials,
@@ -475,11 +484,9 @@ def update_price(
                     'offer_id': product.article or product.sku,
                     'product_id': int(_to_float(ozon_data.get('product_id'), 0)) or None,
                     'price': f'{target_price:.2f}',
-                    'min_price': f'{max(target_price * 0.6, 1):.2f}',
-                    'old_price': f'{max(target_price / 0.6, target_price):.2f}',
-                    'currency_code': 'RUB',
-                    'min_price_for_auto_actions_enabled': True,
-                    'vat': '0.22',
+                    'min_price': f'{target_min_price:.2f}',
+                    'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
+                    'vat': _to_str(price_payload.get('vat'), '0.22'),
                 }
             ],
         )
@@ -489,10 +496,12 @@ def update_price(
 
     fresh_item = refreshed[0] if refreshed else {'price': {'marketing_seller_price': target_price}}
     fresh_price_payload = fresh_item.get('price') or {}
-    updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), payload.new_price)
+    updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), target_price)
+    updated_min_price = _to_float(fresh_price_payload.get('min_price'), target_min_price)
 
     price.previous_price = price.current_price
     price.current_price = updated_price
+    price.min_price = round(min(updated_price, max(updated_min_price, 1.0)), 2)
     if fresh_item:
         fresh_item['promotion_percent'] = promotion_percent
         fresh_item['packaging'] = packaging
@@ -506,7 +515,13 @@ def update_price(
         db,
         current_user.id,
         'patch',
-        {'store_id': store_id, 'offer_id': offer_id, 'new_price': payload.new_price, 'status': 'updated_in_ozon'},
+        {
+            'store_id': store_id,
+            'offer_id': offer_id,
+            'new_price': target_price,
+            'min_price': target_min_price,
+            'status': 'updated_in_ozon',
+        },
     )
 
     db.commit()
@@ -537,7 +552,13 @@ def bulk_update_prices(
     if not payload.updates:
         return PriceListOut(total=0, page=1, page_size=0, items=[], logs=_fetch_logs(db, current_user.id))
 
-    updates_by_offer = {u.offer_id: u.new_price for u in payload.updates}
+    updates_by_offer = {
+        u.offer_id: {
+            'new_price': round(u.new_price, 2),
+            'min_price': round(u.min_price, 2) if u.min_price is not None else None,
+        }
+        for u in payload.updates
+    }
     rows = db.execute(
         select(Product, Price)
         .join(Price, Price.product_id == Product.id)
@@ -559,16 +580,24 @@ def bulk_update_prices(
         offer = product.article or product.sku
         if not offer:
             continue
-        next_price = updates_by_offer.get(offer)
-        if next_price is None:
+        update_values = updates_by_offer.get(offer)
+        if update_values is None:
             continue
         requested_offer_ids.append(offer)
+        ozon_data = _price.ozon_data or {}
+        price_payload = ozon_data.get('price') or {}
+        target_price = update_values['new_price']
+        target_min_price = update_values['min_price']
+        if target_min_price is None:
+            target_min_price = _to_float(_price.min_price, target_price)
+        target_min_price = round(min(target_price, max(target_min_price, 1.0)), 2)
         prices_payload.append(
             {
                 'offer_id': offer,
-                'price': f'{next_price:.2f}',
-                'currency_code': 'RUB',
-                'vat': '0.22',
+                'price': f'{target_price:.2f}',
+                'min_price': f'{target_min_price:.2f}',
+                'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
+                'vat': _to_str(price_payload.get('vat'), '0.22'),
             }
         )
 
@@ -596,15 +625,19 @@ def bulk_update_prices(
             continue
 
         fresh_item = refreshed_by_offer.get(offer)
+        target_values = updates_by_offer[offer]
         if fresh_item:
             fresh_price_payload = fresh_item.get('price') or {}
-            updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), updates_by_offer[offer])
+            updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), target_values['new_price'])
+            updated_min_price = _to_float(fresh_price_payload.get('min_price'), target_values['min_price'] or price.min_price)
             price.ozon_data = fresh_item
         else:
-            updated_price = updates_by_offer[offer]
+            updated_price = target_values['new_price']
+            updated_min_price = target_values['min_price'] or price.min_price
 
         price.previous_price = price.current_price
         price.current_price = updated_price
+        price.min_price = round(min(updated_price, max(_to_float(updated_min_price, updated_price), 1.0)), 2)
         price.updated_at = datetime.utcnow()
         updated_items.append(_build_price_row(product, price))
 
@@ -721,9 +754,8 @@ def apply_markup(
         if base_cost <= 0:
             base_cost = _to_float(source_price.get('net_price'), float(price.previous_price) if price.previous_price else float(price.current_price) * 0.7)
         commissions = ozon_data.get('commissions') or {}
-        target_markup = max(payload.markup_percent, payload.min_price_markup_percent)
         new_price = _calculate_price_from_markup(
-            target_markup,
+            payload.markup_percent,
             base_cost,
             _to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY),
             _to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS),
@@ -733,10 +765,22 @@ def apply_markup(
             _to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT),
             _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST),
         )
-        if new_price <= 0:
+        min_price = _calculate_price_from_markup(
+            payload.min_price_markup_percent,
+            base_cost,
+            _to_float(commissions.get('fbs_deliv_to_customer_amount'), DEFAULT_CUSTOMER_DELIVERY),
+            _to_float(commissions.get('fbs_direct_flow_trans_min_amount'), DEFAULT_LOGISTICS),
+            _to_float(ozon_data.get('first_mile'), DEFAULT_FIRST_MILE),
+            _to_float(ozon_data.get('packaging'), PACKAGING_COST),
+            _to_float(ozon_data.get('promotion_percent'), PROMOTION_RATE * 100),
+            _to_float(commissions.get('sales_percent_fbs'), DEFAULT_COMMISSION_PERCENT),
+            _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST),
+        )
+        if new_price <= 0 or min_price <= 0:
             continue
         price.previous_price = price.current_price
-        price.current_price = new_price
+        price.current_price = round(max(new_price, 1.0), 2)
+        price.min_price = round(min(price.current_price, max(min_price, 1.0)), 2)
         price.updated_at = datetime.utcnow()
 
     _log_price_action(db, current_user.id, 'apply_markup', {'store_id': store_id, 'items': len(rows)})

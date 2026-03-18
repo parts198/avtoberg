@@ -74,6 +74,7 @@ class Price(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey('products.id'), index=True)
     current_price: Mapped[float] = mapped_column(Float)
+    min_price: Mapped[float] = mapped_column(Float, default=0)
     previous_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     cost_price: Mapped[float] = mapped_column(Float, default=0)
     ozon_data: Mapped[dict] = mapped_column(JSON, default=dict)
