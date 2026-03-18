@@ -1,0 +1,96 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Заказы</title>
+  <link rel="stylesheet" href="{% static 'orders/orders.css' %}">
+</head>
+<body>
+  <main class="orders-page">
+    <header class="topbar">
+      <div>
+        <h1>Заказы</h1>
+        <p id="status-text" class="muted">Готово к загрузке.</p>
+      </div>
+      <button id="refresh-btn" class="btn">Обновить</button>
+    </header>
+
+    <section class="status-card card">
+      <p id="orders-summary" class="summary-badge">Пока нет данных.</p>
+      <p id="scope-note" class="muted"></p>
+      <p id="error-text" class="error hidden"></p>
+    </section>
+
+    <section class="filters card">
+      <div class="filters-grid">
+        <label>Магазин
+          <select id="store-filter"><option value="">Все</option></select>
+        </label>
+        <label>Дата от
+          <input id="date-from-filter" type="date">
+        </label>
+        <label>Дата до
+          <input id="date-to-filter" type="date">
+        </label>
+        <label>Схема
+          <select id="schema-filter">
+            <option value="ALL">ALL</option>
+            <option value="FBS">FBS</option>
+            <option value="FBO">FBO</option>
+          </select>
+        </label>
+        <label>Offer ID
+          <input id="offer-id-filter" type="text" placeholder="Поиск по offer_id">
+        </label>
+      </div>
+      <div class="actions-row">
+        <button id="apply-filters-btn" class="btn btn-primary">Применить</button>
+        <button id="reset-filters-btn" class="btn">Сбросить</button>
+      </div>
+    </section>
+
+    <section id="summary" class="summary-grid"></section>
+
+    <section class="card">
+      <h2>Список заказов</h2>
+      <div id="loading-state" class="muted hidden">Загрузка заказов…</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Posting</th>
+              <th>Магазин</th>
+              <th>Статус</th>
+              <th>Схема</th>
+              <th>1-й offer_id</th>
+              <th>Позиций</th>
+              <th>Штук</th>
+              <th>Наценка</th>
+              <th>Создан</th>
+              <th>Выручка</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="orders-body"></tbody>
+        </table>
+      </div>
+      <p id="empty-state" class="muted hidden">Заказы не найдены для выбранных фильтров.</p>
+    </section>
+
+    <section class="card">
+      <h2>Итоги по выборке</h2>
+      <div id="totals" class="totals"></div>
+    </section>
+
+    <section class="card">
+      <h2>Распределение заказов по часам</h2>
+      <div id="hourly-chart" class="hourly-chart"></div>
+      <p id="hourly-todo" class="muted hidden">TODO: расширить график до прогноза расходов и более детальной аналитики.</p>
+    </section>
+  </main>
+  <script src="{% static 'orders/orders.js' %}"></script>
+</body>
+</html>
