@@ -254,6 +254,7 @@ export default function PricesPage() {
       setStatus(`Позиция ${offerId} обновлена в Ozon и перечитана`)
     } catch (err) {
       setError(humanPriceError(err instanceof Error ? err.message : 'Ошибка обновления позиции'))
+      setStatus(`Ошибка обновления ${offerId}`)
     }
   }
 

@@ -12,6 +12,10 @@ class ConnectionCheckResult:
     message: str
 
 
+class OzonImportPricesError(RuntimeError):
+    pass
+
+
 class MarketplaceClient:
     def check_connection(self, credentials: dict[str, str]) -> ConnectionCheckResult:
         raise NotImplementedError
@@ -22,6 +26,71 @@ class MarketplaceClient:
 
 class OzonClient(MarketplaceClient):
     base_url = 'https://api-seller.ozon.ru'
+
+    def _collect_import_price_errors(self, payload: object) -> dict[str, list[str]]:
+        errors_by_offer: dict[str, list[str]] = {}
+
+        def add_error(offer_id: str, message: str):
+            offer = str(offer_id or '').strip() or 'unknown'
+            text = str(message or '').strip()
+            if not text:
+                return
+            errors_by_offer.setdefault(offer, [])
+            if text not in errors_by_offer[offer]:
+                errors_by_offer[offer].append(text)
+
+        def scan(node: object, fallback_offer_id: str = ''):
+            if isinstance(node, dict):
+                offer_id = str(
+                    node.get('offer_id')
+                    or node.get('offerId')
+                    or node.get('offer')
+                    or fallback_offer_id
+                    or ''
+                ).strip()
+
+                errors = node.get('errors')
+                if isinstance(errors, list):
+                    for item in errors:
+                        if isinstance(item, dict):
+                            add_error(
+                                offer_id or str(item.get('offer_id') or item.get('offerId') or '').strip(),
+                                item.get('message') or item.get('error') or item.get('detail') or item.get('code'),
+                            )
+                        else:
+                            add_error(offer_id, item)
+                elif errors:
+                    add_error(offer_id, errors)
+
+                for key in ('error', 'message', 'detail'):
+                    value = node.get(key)
+                    if key == 'message' and node.get('updated') is not False and node.get('success') is not False:
+                        continue
+                    if value and (node.get('updated') is False or node.get('success') is False or key != 'message'):
+                        add_error(offer_id, value)
+
+                for key in ('result', 'items', 'prices', 'price_indexes', 'data'):
+                    nested = node.get(key)
+                    if isinstance(nested, (dict, list)):
+                        scan(nested, offer_id)
+            elif isinstance(node, list):
+                for item in node:
+                    scan(item, fallback_offer_id)
+
+        scan(payload)
+        return errors_by_offer
+
+    def _raise_for_import_price_errors(self, payload: object):
+        errors_by_offer = self._collect_import_price_errors(payload)
+        filtered_errors = {offer_id: messages for offer_id, messages in errors_by_offer.items() if messages}
+        if not filtered_errors:
+            return
+
+        parts: list[str] = []
+        for offer_id, messages in filtered_errors.items():
+            prefix = f'offer_id={offer_id}: ' if offer_id != 'unknown' else ''
+            parts.append(f'{prefix}{"; ".join(messages)}')
+        raise OzonImportPricesError(f'Ozon отклонил обновление цены: {" | ".join(parts)}')
 
     def _headers(self, credentials: dict[str, str]) -> dict[str, str]:
         return {
@@ -174,7 +243,9 @@ class OzonClient(MarketplaceClient):
             if response.status_code in {401, 403}:
                 raise RuntimeError('Нет доступа к обновлению цен в Ozon (проверьте Client-Id и Api-Key)')
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
+            self._raise_for_import_price_errors(payload)
+            return payload
 
 
 class WildberriesClient(MarketplaceClient):

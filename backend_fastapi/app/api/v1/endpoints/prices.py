@@ -1,5 +1,6 @@
 from datetime import datetime
 from io import BytesIO
+from time import sleep
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -293,6 +294,38 @@ def _upsert_products_and_prices(
     return len(touched_product_ids), created_products, created_prices
 
 
+def _price_matches_target(item: dict | None, target_price: float, target_min_price: float) -> bool:
+    if not item:
+        return False
+    price_payload = item.get('price') or {}
+    refreshed_price = round(_to_float(price_payload.get('marketing_seller_price'), -1), 2)
+    refreshed_min_price = round(_to_float(price_payload.get('min_price'), -1), 2)
+    return refreshed_price == round(target_price, 2) and refreshed_min_price == round(target_min_price, 2)
+
+
+def _fetch_price_with_retry(
+    client: OzonClient,
+    credentials: dict[str, str],
+    offer_id: str,
+    target_price: float,
+    target_min_price: float,
+    attempts: int = 5,
+    pause_seconds: float = 0.35,
+) -> tuple[dict | None, bool, bool]:
+    latest_item: dict | None = None
+
+    for attempt in range(attempts):
+        refreshed_items = client.fetch_prices(credentials, [offer_id])
+        latest_item = refreshed_items[0] if refreshed_items else None
+        if _price_matches_target(latest_item, target_price, target_min_price):
+            return latest_item, True, False
+        if attempt < attempts - 1:
+            sleep(pause_seconds * (attempt + 1))
+
+    stale_after_refresh = latest_item is not None
+    return latest_item, False, stale_after_refresh
+
+
 def _fetch_logs(db: Session, user_id: int, limit: int = 20) -> list[PriceLogEntryOut]:
     logs = db.scalars(
         select(AuditLog)
@@ -476,13 +509,17 @@ def update_price(
     target_price = round(max(target_price, 1.0), 2)
     target_min_price = round(min(target_price, max(target_min_price, 1.0)), 2)
 
+    accepted_by_ozon = False
+    refreshed_from_ozon = False
+    stale_after_refresh = False
+    fresh_item: dict | None = None
+
     try:
         client.import_prices(
             store_credentials,
             [
                 {
                     'offer_id': product.article or product.sku,
-                    'product_id': int(_to_float(ozon_data.get('product_id'), 0)) or None,
                     'price': f'{target_price:.2f}',
                     'min_price': f'{target_min_price:.2f}',
                     'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
@@ -490,25 +527,47 @@ def update_price(
                 }
             ],
         )
-        refreshed = client.fetch_prices(store_credentials, [product.article or product.sku])
+        accepted_by_ozon = True
+        fresh_item, refreshed_from_ozon, stale_after_refresh = _fetch_price_with_retry(
+            client,
+            store_credentials,
+            product.article or product.sku,
+            target_price,
+            target_min_price,
+        )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail='Не удалось обновить цену в Ozon') from exc
+        detail = _to_str(exc, 'Не удалось обновить цену в Ozon')
+        raise HTTPException(status_code=502, detail=detail) from exc
 
-    fresh_item = refreshed[0] if refreshed else {'price': {'marketing_seller_price': target_price}}
-    fresh_price_payload = fresh_item.get('price') or {}
-    updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), target_price)
-    updated_min_price = _to_float(fresh_price_payload.get('min_price'), target_min_price)
+    effective_item = fresh_item or {'price': {}}
+    fresh_price_payload = effective_item.get('price') or {}
+    if refreshed_from_ozon:
+        updated_price = _to_float(fresh_price_payload.get('marketing_seller_price'), target_price)
+        updated_min_price = _to_float(fresh_price_payload.get('min_price'), target_min_price)
+    else:
+        updated_price = target_price
+        updated_min_price = target_min_price
+        effective_item = {
+            **(fresh_item or ozon_data or {}),
+            'price': {
+                **((fresh_item or ozon_data or {}).get('price') or {}),
+                'marketing_seller_price': f'{target_price:.2f}',
+                'min_price': f'{target_min_price:.2f}',
+                'currency_code': _to_str(price_payload.get('currency_code'), 'RUB'),
+                'vat': _to_str(price_payload.get('vat'), '0.22'),
+            },
+        }
 
     price.previous_price = price.current_price
     price.current_price = updated_price
     price.min_price = round(min(updated_price, max(updated_min_price, 1.0)), 2)
-    if fresh_item:
-        fresh_item['promotion_percent'] = promotion_percent
-        fresh_item['packaging'] = packaging
-        fresh_item['first_mile'] = _to_float(ozon_data.get('first_mile'), DEFAULT_FIRST_MILE)
-        fresh_item['fbs_cost'] = _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST)
+    if effective_item:
+        effective_item['promotion_percent'] = promotion_percent
+        effective_item['packaging'] = packaging
+        effective_item['first_mile'] = _to_float(ozon_data.get('first_mile'), DEFAULT_FIRST_MILE)
+        effective_item['fbs_cost'] = _to_float(ozon_data.get('fbs_cost'), DEFAULT_FBS_COST)
     price.cost_price = round(max(cost_price, 0.0), 2)
-    price.ozon_data = fresh_item or price.ozon_data
+    price.ozon_data = effective_item or price.ozon_data
     price.updated_at = datetime.utcnow()
 
     _log_price_action(
@@ -520,7 +579,10 @@ def update_price(
             'offer_id': offer_id,
             'new_price': target_price,
             'min_price': target_min_price,
-            'status': 'updated_in_ozon',
+            'accepted_by_ozon': accepted_by_ozon,
+            'refreshed_from_ozon': refreshed_from_ozon,
+            'stale_after_refresh': stale_after_refresh,
+            'status': 'updated_in_ozon' if refreshed_from_ozon else 'accepted_by_ozon',
         },
     )
 
